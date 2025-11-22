@@ -1,0 +1,110 @@
+[project]
+name = "disco"
+dynamic = ["version"]
+description = "A distributed simulation core."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Michiel Jansen" }]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: C++",
+  "Operating System :: OS Independent",
+]
+dependencies = [
+  "numpy>=1.23",
+]
+
+[build-system]
+requires = [
+  "scikit-build-core>=0.9",
+  "pybind11>=2.11",
+  "numpy>=1.23",
+  "setuptools-scm>=8",
+]
+build-backend = "scikit_build_core.build"
+
+[tool.scikit-build]
+editable.mode = "redirect"
+wheel.packages = ["src/disco"]
+
+[tool.scikit-build.metadata]
+version.provider = "scikit_build_core.metadata.setuptools_scm"
+
+[tool.setuptools_scm]
+write_to = "src/disco/_version.py"
+version_scheme = "guess-next-dev"
+local_scheme = "no-local-version"
+fallback_version = "0.0.0"
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+  "pytest-cov>=5",
+  "mypy>=1.10",
+  "cibuildwheel>=2.20",
+  "pybind11-stubgen>=2.5",
+  "twine>=5",
+]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.cibuildwheel]
+# Only CPython, no PyPy; skip 3.14 until deps catch up.
+build = "cp311-* cp312-* cp313-*"
+skip = "*-win32 *-cp313t-* *-cp314t-* *-cp314-* *-musllinux_*"
+test-command = "pytest -q {project}/tests"
+test-extras = ["dev", "parquet"]
+# Build phase env
+environment = { PIP_ONLY_BINARY = "numpy,pyarrow", PIP_PREFER_BINARY = "1" }
+
+[tool.cibuildwheel.linux]
+archs = ["x86_64"]  # add "aarch64" if you enable QEMU
+
+[tool.cibuildwheel.macos]
+archs = ["arm64", "x86_64"]  # or ["universal2"]
+
+[tool.scikit-build.cmake.define]
+PYBIND11_FINDPYTHON = true
+CMAKE_DOWNLOAD_TIMEOUT = 30
+# BUILD_EXT default (override in CI via env SKBUILD_CMAKE_ARGS)
+BUILD_EXT = true
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_configs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_return_any = true
+ignore_missing_imports = true
+
+# Baseline for the whole project
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = true
+no_implicit_optional = true
+strict_equality = true
+show_error_codes = true
+
+# You can also add this if you want colored output:
+# color_output = true
+
+# Per-module overrides
+[[tool.mypy.overrides]]
+module = "disco.disco.*"
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+no_implicit_reexport = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = true
