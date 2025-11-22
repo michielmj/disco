@@ -1,6 +1,6 @@
-# 🧾 disco
+# 🧾 Disco
 
-**{{project_description}}**  
+**A Distributed Simulation Core**  
 
 [![PyPI](https://img.shields.io/pypi/v/disco.svg)](https://pypi.org/project/disco/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
