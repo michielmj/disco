@@ -26,7 +26,7 @@ Follow the guidance in `ENGINEERING_SPEC.md`:
 - All new code must be accompanied by `pytest` test cases.
 - Tests must cover:
   - Local vs remote behavior for `NodeController`.
-  - `"self` alias behavior.
+  - `"self"` alias behavior.
   - Serialization is called exactly once per send.
   - InProcessTransport correctly calls the receiver.
 - Tests should live in the `tests/` directory and follow the `test_*.py` naming pattern.
@@ -41,6 +41,7 @@ Follow the guidance in `ENGINEERING_SPEC.md`:
 - Tests live under `tests/`.
 - Prefer small files over large ones.
 - Keep imports local to modules where needed (avoid heavy top-level imports).
+- Install development dependencies with `pip install -e '.[dev]'` before running tests.
 
 ## Pull Requests
 Codex should:
