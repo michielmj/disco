@@ -1,0 +1,100 @@
+#############################################
+# disco – Default Configuration File
+# This file defines default values for services
+# running under the disco ecosystem.
+#############################################
+
+app_name = "disco"
+debug = false
+
+
+#############################################
+# Logging Settings
+#############################################
+[logging]
+# One of: CRITICAL, ERROR, WARNING, INFO, DEBUG
+level = "INFO"
+
+# Log format using standard logging %-placeholders
+format = "%(asctime)-20s %(processName)-30s %(name)-40s %(levelname)-8s: %(message)s"
+
+
+#############################################
+# gRPC Settings
+#############################################
+[grpc]
+# Server bind address/port
+bind_host = "0.0.0.0"
+bind_port = 50051
+
+# Default timeout for client requests
+timeout_s = 600.0
+
+# Worker pool
+max_workers = 10
+
+# Graceful shutdown timeout
+grace_s = 60.0
+
+# Message size limits (None = library default)
+max_send_message_bytes = 10485760    # 10 MB
+max_receive_message_bytes = 10485760 # 10 MB
+
+# Connection keepalive (None = disabled)
+keepalive_time_s = 60.0
+keepalive_timeout_s = 20.0
+keepalive_permit_without_calls = false
+
+# Compression: "none" or "gzip"
+compression = "none"
+
+
+#############################################
+# Zookeeper Settings
+#############################################
+[zookeeper]
+# Comma-separated hosts of your ensemble
+hosts = "localhost:2181"
+
+# Optional chroot (namespace)
+chroot = "/disco"
+
+default_group = "default"
+
+session_timeout_s = 10.0
+connection_timeout_s = 5.0
+
+# Retry policy
+max_retries = 5
+retry_delay_s = 1.0
+
+# Authentication (optional)
+auth_scheme = ""
+auth_credentials = ""
+
+# TLS settings (enable if your cluster is secured)
+use_tls = false
+ca_cert = ""
+client_cert = ""
+client_key = ""
+
+
+#############################################
+# Database Settings
+#############################################
+[database]
+# SQLAlchemy DSN
+# In production, this should come from secrets instead.
+url = "postgresql+psycopg://user:password@localhost:5432/disco"
+
+# Connection tuning
+pool_size = 10
+max_overflow = 20
+
+
+#############################################
+# Serialization Settings
+#############################################
+[serialization]
+# Pickle protocol version; defaults to HIGHEST_PROTOCOL if omitted
+protocol = 5
