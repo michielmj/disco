@@ -20,7 +20,7 @@ def test_local_event_delivery() -> None:
     def record(envelope: EventEnvelope) -> None:
         captured.append(envelope)
 
-    controller._deliver_local_event = record  # type: ignore[attr-defined]
+    controller._deliver_local_event = record
 
     controller.send_event("alpha/main", epoch=1.0, data=b"payload", headers={"k": "v"})
 
@@ -41,7 +41,7 @@ def test_self_alias_uses_local_delivery() -> None:
     def record(envelope: EventEnvelope) -> None:
         captured.append(envelope)
 
-    controller._deliver_local_event = record  # type: ignore[attr-defined]
+    controller._deliver_local_event = record
 
     controller.send_event("self/compute", epoch=2.5, data=b"bytes")
 
@@ -61,7 +61,7 @@ def test_remote_event_serialization_once() -> None:
     def record(envelope: EventEnvelope) -> None:
         received.append(envelope)
 
-    receiver._deliver_local_event = record  # type: ignore[attr-defined]
+    receiver._deliver_local_event = record
 
     calls: list[bytes] = []
 
@@ -69,7 +69,7 @@ def test_remote_event_serialization_once() -> None:
         calls.append(b"call")
         return pickle.dumps(obj)
 
-    sender._serializer = serializer  # type: ignore[attr-defined]
+    sender._serializer = serializer
 
     sender.send_event("beta/main", epoch=3.0, data=b"remote")
 
@@ -90,7 +90,7 @@ def test_remote_promise_via_transport() -> None:
     def record_promise(envelope: PromiseEnvelope) -> None:
         received_promises.append(envelope)
 
-    receiver._deliver_local_promise = record_promise  # type: ignore[attr-defined]
+    receiver._deliver_local_promise = record_promise
 
     transport = InProcessTransport({"beta": receiver})
     router_a.register_transport(transport)
@@ -115,7 +115,7 @@ def test_remote_event_through_transport() -> None:
     def record(envelope: EventEnvelope) -> None:
         received.append(envelope)
 
-    receiver._deliver_local_event = record  # type: ignore[attr-defined]
+    receiver._deliver_local_event = record
 
     transport = InProcessTransport({"beta": receiver})
     router_a.register_transport(transport)

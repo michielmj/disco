@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """NodeController skeleton responsible for serialization and routing."""
+
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 import pickle
@@ -10,7 +10,15 @@ from .envelopes import EventEnvelope, PromiseEnvelope
 from .router import Router
 
 
-@dataclass(slots=True)
+def _noop_event(_: EventEnvelope) -> None:
+    """Default no-op for local event handling."""
+
+
+def _noop_promise(_: PromiseEnvelope) -> None:
+    """Default no-op for local promise handling."""
+
+
+@dataclass
 class NodeController:
     """Manage sending and receiving events and promises for a node."""
 
@@ -18,6 +26,12 @@ class NodeController:
     router: Router
     _serializer: Callable[[Any], bytes] = field(default=pickle.dumps)
     _deserializer: Callable[[bytes], Any] = field(default=pickle.loads)
+    _deliver_local_event: Callable[[EventEnvelope], None] = field(
+        default=_noop_event, repr=False
+    )
+    _deliver_local_promise: Callable[[PromiseEnvelope], None] = field(
+        default=_noop_promise, repr=False
+    )
 
     def __post_init__(self) -> None:
         self.router.register_node(self)
@@ -100,11 +114,3 @@ class NodeController:
         if not isinstance(envelope, PromiseEnvelope):
             raise TypeError("deserialized payload is not PromiseEnvelope")
         return envelope
-
-    def _deliver_local_event(self, envelope: EventEnvelope) -> None:
-        # Implemented in later iterations.
-        return
-
-    def _deliver_local_promise(self, envelope: PromiseEnvelope) -> None:
-        # Implemented in later iterations.
-        return

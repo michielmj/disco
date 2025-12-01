@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-"""Transport implementations for disco."""
+"""Transport interfaces and implementations."""
 
 from .base import Transport
-from .inprocess import InProcessTransport
 
-__all__ = ["Transport", "InProcessTransport"]
+__all__ = ["Transport"]
