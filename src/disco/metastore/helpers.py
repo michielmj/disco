@@ -224,16 +224,20 @@ class ZkConnectionManager:
 
     def _reinstall_watches(self) -> None:
         """
-        Reinstall all cached data watches after a LOST -> CONNECTED transition.
+        Reinstall all cached data and children watches after a LOST -> CONNECTED transition.
         """
+        with self._lock:
+            data_items: list[
+                tuple[uuid.UUID, tuple[str, Callable[[Optional[bytes], str], bool]]]
+            ] = list(self._watched.items())
+            children_items: list[
+                tuple[uuid.UUID, tuple[str, Callable[[Optional[list[str]], str], bool]]]
+            ] = list(self._children_watched.items())
 
-        data_items = list(self._watched.items())
-        children_items = list(self._children_watched.items())
-
-        for watch_id, (path, callback) in data_items:
+        for watch_id, (path, data_cb) in data_items:
             logger.debug("Reinstalling data watch %s on path %s", watch_id, path)
-            self._install_data_watch(watch_id, path, callback)
+            self._install_data_watch(watch_id, path, data_cb)
 
-        for watch_id, (path, callback) in children_items:
+        for watch_id, (path, children_cb) in children_items:
             logger.debug("Reinstalling children watch %s on path %s", watch_id, path)
-            self._install_children_watch(watch_id, path, callback)
+            self._install_children_watch(watch_id, path, children_cb)
