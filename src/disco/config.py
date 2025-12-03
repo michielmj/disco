@@ -1,6 +1,6 @@
 import pickle
 from functools import lru_cache
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel, Field, PostgresDsn
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -14,6 +14,7 @@ class ConfigError(RuntimeError):
 # ─────────────────────────────────────────────────────────────
 # Section configs
 # ─────────────────────────────────────────────────────────────
+
 
 class LoggingSettings(BaseModel):
     level: Literal["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"] = "INFO"
@@ -139,7 +140,7 @@ class DatabaseSettings(BaseModel):
     - secret file: /run/secrets/disco/database__url
     """
     url: PostgresDsn = Field(
-        "postgresql+psycopg://user:password@localhost:5432/disco",
+        cast(PostgresDsn, "postgresql+psycopg://user:password@localhost:5432/disco"),
         description="SQLAlchemy-style database URL.",
     )
     pool_size: int = 10
@@ -158,23 +159,27 @@ class SerializationSettings(BaseModel):
 
     protocol: int = Field(
         pickle.HIGHEST_PROTOCOL,
-        description="Pickle protocol version. Defaults to the highest supported by this Python version."
+        description=(
+            "Pickle protocol version. Defaults to the highest supported "
+            "by this Python version."
+        ),
     )
 
     def validate_protocol(self) -> None:
         """Ensure user-specified protocol is supported by this interpreter."""
-        import pickle
+        import pickle as _pickle
 
-        if not (0 <= self.protocol <= pickle.HIGHEST_PROTOCOL):
+        if not (0 <= self.protocol <= _pickle.HIGHEST_PROTOCOL):
             raise ValueError(
                 f"Unsupported pickle protocol={self.protocol}. "
-                f"This interpreter supports up to protocol={pickle.HIGHEST_PROTOCOL}."
+                f"This interpreter supports up to protocol={_pickle.HIGHEST_PROTOCOL}."
             )
 
 
 # ─────────────────────────────────────────────────────────────
 # Top-level settings
 # ─────────────────────────────────────────────────────────────
+
 
 class AppSettings(BaseSettings):
     """
@@ -203,10 +208,10 @@ class AppSettings(BaseSettings):
     debug: bool = False
 
     logging: LoggingSettings = LoggingSettings()
-    grpc: GrpcSettings = GrpcSettings()
-    zookeeper: ZookeeperSettings = ZookeeperSettings()
-    database: DatabaseSettings = DatabaseSettings()
-    serialization: SerializationSettings = SerializationSettings()
+    grpc: GrpcSettings = GrpcSettings()  # type: ignore[call-arg]
+    zookeeper: ZookeeperSettings = ZookeeperSettings()  # type: ignore[call-arg]
+    database: DatabaseSettings = DatabaseSettings()  # type: ignore[call-arg]
+    serialization: SerializationSettings = SerializationSettings()  # type: ignore[call-arg]
 
 
 @lru_cache(maxsize=1)

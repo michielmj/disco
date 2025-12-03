@@ -614,157 +614,271 @@ Tests should cover both **egress** and **ingress** sides, plus an end-to-end sce
 
 ### 8.1 Purpose
 
-The Metadata Store provides a distributed, fault-tolerant key–value hierarchy used by simulation servers to coordinate state, assignments, routing metadata, replication information, and other dynamic configuration elements. It acts as the system-wide source of truth for metadata that must be shared across processes, nodes, or simulation clusters.
+The Metadata Store provides a distributed, fault-tolerant key–value hierarchy used by simulation servers to coordinate state, routing metadata, replication information, and dynamic configuration. It acts as the system-wide source of truth that must be shared across processes and clusters.
 
 ### 8.2 Design Overview
 
-The metastore is implemented as a thin, high-level API on top of ZooKeeper via the `ZkConnectionManager`. It provides atomic hierarchical operations, optional path namespacing via “groups”, lightweight pub/sub via watch callbacks, and structured data expansion semantics for nested trees.
+The Metastore is a thin, high-level API on top of ZooKeeper accessed through `ZkConnectionManager`. It provides:
 
-The metastore uses:
+- **Hierarchical atomic operations** (`update_key`, `update_keys`, `get_key`, `get_keys`)
+- **Optional namespacing via groups** (logical prefixing)
+- **Structured expand semantics** for nested metadata trees
+- **Watchers** with automatic restoration after reconnect
+- **Simple queue primitives** for lightweight inter-node coordination
+- **Pluggable serialization** (default: pickle)
 
-- **ZkConnectionManager**: one ZooKeeper client per process, automatically reconnected, watchers restored.
-- **Serialization**: pluggable `packb` / `unpackb` (defaults: `pickle.dumps` / `pickle.loads`).
-- **Hierarchical API**: `update_key`, `update_keys`, `get_key`, `get_keys`.
-- **Expand semantics**: declarative control over nested tree retrieval and persistence.
-- **Watch support**: callback functions attached to paths, automatically restored after reconnects.
+Logical paths (e.g., `"servers/s1/state"`) map to ZooKeeper paths via:
 
-The metastore exposes *logical paths* (e.g. `"replications/r1/assignments/a"`). These are mapped to ZooKeeper paths via:
-
-```text
+```
 _full_path(path) =
     "/" + group + "/" + path        if group is set
     "/" + path                      otherwise
 ```
 
-Examples:
-
-- group = `sim1`, path = `"foo/bar"` → `"/sim1/foo/bar"`
-- group = None, path = `"foo/bar"` → `"/foo/bar"`
-
-This allows multiple simulations or tenants to share the same ZK cluster.
+This allows multi‑tenant simulations on a shared ZooKeeper cluster.
 
 ### 8.3 Base Structure
 
-On initialization, the metastore ensures a predefined directory structure (`BASE_STRUCTURE`) inside the chroot. If a group is configured, these structures are created inside the group namespace.
+On construction, the Metastore ensures a predefined directory structure (`BASE_STRUCTURE`).  
+If a group is configured, creation happens inside that namespace.
+
+This ensures deterministic availability of the simulation’s metadata tree.
 
 ### 8.4 Serialization
 
-All stored values are serialized using:
+All values are stored as bytes using:
 
 - `packb(value) -> bytes`
 - `unpackb(bytes) -> value`
 
-Users may inject custom serializers (e.g. msgpack, raw JSON, custom binary formats).
+Users may override with msgpack, JSON, or domain-specific binary formats.
 
 ### 8.5 Watch Callbacks
 
-Watchers are registered through:
+Watches are registered using:
 
-```text
+```
 watch_with_callback(path, callback)
+watch_members_with_callback(path, callback)
 ```
 
-Callbacks receive `(value, full_path)` and must return:
+Callbacks must return:
 
-- **True** → continue watching  
-- **False** → unregister the watcher  
+- **True** → keep watching  
+- **False** → stop watching  
 
-Deletion events pass `raw=None` to the wrapper, which stops the watch automatically.
+The `ZkConnectionManager` automatically restores these watchers after reconnects.
 
-The `ZkConnectionManager` restores all watches on reconnect.
+Deletion events produce `raw=None`, which removes the watch by default.
 
 ### 8.6 Key–Value Operations
 
-- `update_key(path, value)`  
-  Stores a single leaf value.
+- `update_key(path, value)` – set/overwrite a single key.
+- `get_key(path)` – load and deserialize a key.
+- `update_keys(path, members, expand=...)` – structured nested update.
+- `get_keys(path, expand=...)` – structured nested load.
+- `__contains__(path)` – check existence.
+- `list_members(path)` – list children.
 
-- `get_key(path)`  
-  Reads and deserializes a leaf value. Returns `None` if not present.
+The Metastore consistently treats nodes as existing if they hold *either* data or children.
 
-### 8.7 Hierarchical Get/Update
+### 8.7 Expand Semantics (Hierarchical Read/Write)
 
-#### Expand Semantics
-
-The `expand` parameter dictates how nested structures are written or read:
-
-- **`expand = {"replications": {"assignments": None}}`**  
-  → fully expand `replications`, expand one level for `assignments`.
-
-- **`expand = {"replications": None}`**  
-  → expand `replications` only one level; store subtrees as dictionaries.
+`expand` controls how nested dictionaries are expanded into node hierarchies.
 
 Examples:
 
-With:
-
-```python
+#### Nested expansion
+```
+expand = {"replications": {"assignments": None}}
 members = {"replications": {"r1": {"assignments": {"a": 1}}}}
 ```
 
-**Case A — nested expand**
-
-```python
-expand = {"replications": {"assignments": None}}
-```
-
 Writes:
-
-```text
+```
 /replications/r1/assignments/a = 1
 ```
 
-**Case B — shallow expand**
-
-```python
+#### Shallow expansion
+```
 expand = {"replications": None}
 ```
 
 Writes:
-
-```text
+```
 /replications/assignments = {"a": 1}
 ```
 
+This allows callers to choose full tree flattening or partially serialized subtrees.
+
 ### 8.8 Automatic Parent Node Behavior
 
-ZooKeeper itself distinguishes between nodes and their children. Our FakeKazooClient mimics this semantics: a parent exists if it has either data or children. This ensures `get_keys()` behaves consistently.
+ZooKeeper’s model: a node exists if it has *data or children*.  
+Our FakeKazooClient matches this behavior to ensure consistent read semantics, including for deeper `expand` operations.
 
 ### 8.9 Queue Operations
 
-The metastore exposes simple FIFO queue operations backed by ZooKeeper’s `Queue` recipe:
+Queue primitives use ZooKeeper’s recipe:
 
 - `enqueue(path, value)`
 - `dequeue(path, timeout=None)`
 
-These are used for lightweight inter-node message passing or distribution of pending events.
+This is used for small, low‑frequency coordination messages (not bulk data).
 
 ### 8.10 Failure & Recovery Semantics
 
-- All client operations route through a single client instance owned by `ZkConnectionManager`.
-- Session loss triggers automatic reconnection and watch reinstallation.
-- `update_keys` and `get_keys` operate only on logical paths, ensuring compatibility with grouping and chrooting.
+- A single KazooClient per process is owned by `ZkConnectionManager`.
+- On session loss:
+  - Reconnect is automatic.
+  - All watchers are restored.
+- `update_keys` and `get_keys` remain consistent under chroot and group namespaces.
 
-### 8.11 Intended Usage in the Application
+### 8.11 Intended Uses
 
-- Store routing tables, node status, simulation assignments, replication metadata.
-- Provide shared configuration across long-lived processes.
-- Support live reconfiguration without restarts.
-- Enable efficient, fine-grained read access to metadata subsets.
-- Allow stateless workers to bootstrap by reading the full hierarchical metadata tree.
+- Registration of active servers
+- Routing/replication metadata
+- Simulation configuration and parameters
+- Address books and ownership mappings
+- Coordination of distributed workers
+- Bootstrap of stateless server processes
 
-### 8.12 Limitations / Non-Goals
+### 8.12 Non‑Goals
 
-- Not designed for large binary payloads (those must go to shared memory or the data layer).
-- Not a transactional database—ZooKeeper operations are atomic per node, not per subtree.
-- Not a metrics store or event log.
+- Not suited for large payloads → use SharedMemory or data layer
+- Not transactional at subtree level
+- Not a metrics repository or log store
+- Not a general-purpose database
 
 ### 8.13 Testing Requirements
 
-- Use `FakeKazooClient` and `FakeConnectionManager` for isolated testing.
-- Must test:
-  - expand semantics round-trip (write → read)
-  - watch registration and deletion behavior
-  - recoverability after reconnection
-  - queue timeouts and ordering
-  - group namespacing in paths
-  - handling of scalar vs dictionary values in expansion
+Test using `FakeKazooClient` & `FakeConnectionManager`:
+
+- `expand` semantics (full vs shallow)
+- Nested writes and reads
+- Watch installation and deletion
+- Recovery after simulated reconnect
+- Queue operations including timeout
+- Group/chroot path correctness
+- Mixed scalar/dict storage interactions
+
+
+## 9 Cluster
+
+The **Cluster** component provides a high‑level abstraction for managing active simulation servers, tracking their state, and maintaining a consistent, fault‑tolerant view of server metadata stored in ZooKeeper through the Metastore.
+
+### 9.1 Purpose
+
+Cluster is responsible for:
+
+- Tracking which servers are currently active in the system.
+- Watching ZooKeeper paths for:
+  - server registration / unregistration,
+  - server state changes (e.g., AVAILABLE → ALLOCATED → ACTIVE),
+  - server metadata updates (nodes, repid, expid, partition).
+- Maintaining an in‑memory representation of:
+  - server states,
+  - server nodes,
+  - replication IDs,
+  - derived address book mappings.
+- Providing selection and availability helpers used by the scheduler and routing layer.
+
+### 9.2 Core Architecture
+
+Cluster operates as an in‑memory cache driven entirely by **watch callbacks** on ZooKeeper paths:
+
+- `/simulation/active_servers` — identifies currently registered servers.
+- `/simulation/active_servers/<server>` — stores server state (`State` enum).
+- `/simulation/servers/<server>/nodes` — stores the list of nodes hosted by the server.
+- `/simulation/servers/<server>/repid` — stores the replication ID for the server.
+
+Cluster registers a children‑watch on `/simulation/active_servers`:
+
+- New servers trigger installing of three watch callbacks:
+  - Watch server state,
+  - Watch server nodes,
+  - Watch server repid.
+- Removed servers cause internal dictionaries to drop all related cached values.
+
+Cluster maintains three internal dictionaries under a lock:
+
+```
+_server_state:   dict[str, State]
+_server_nodes:   dict[str, list[str]]
+_server_repids:  dict[str, str]
+```
+
+These remain consistent as ZooKeeper changes occur.
+
+### 9.3 Registration & Unregistration
+
+Cluster provides:
+
+- `register_server(server: str, state: State)`  
+  Creates ephemeral node `/active_servers/<server>` with value = `state`, and initializes a default `ServerInfo` subtree.
+- `unregister_server(server: str)`  
+  Deletes the ephemeral node, removing the server from the watch list.
+
+### 9.4 State & Metadata Management
+
+Cluster provides helpers:
+
+- `set_server_state(server, state)`  
+  Updates the ephemeral node value.
+- `get_server_state(server)`  
+  Reads it back.
+- `update_server_info(server, partition, expid, repid, nodes)`  
+  Updates keys under `/servers/<server>/...`
+- `get_server_info(server)`  
+  Returns a typed `ServerInfo` instance.
+
+All writes are executed via Metastore; Cluster never writes directly to ZooKeeper.
+
+### 9.5 Availability Logic
+
+`get_available(expid)` determines which servers are eligible for assignment:
+
+- Only servers in state `AVAILABLE` are considered.
+- Servers matching the requested `expid` and offering unique partitions are **preferred**.
+- All other available servers are classified as **fallback candidates**.
+
+Returns:
+
+```
+(preferred + others, partitions_of_preferred)
+```
+
+### 9.6 Address Book Generation
+
+Read‑only property:
+
+```
+address_book: Mapping[(repid, node), server]
+```
+
+Recomputed lazily on demand from:
+
+- `_server_nodes`,
+- `_server_repids`.
+
+Used by the routing layer to locate which server hosts a given node‑instance pair.
+
+### 9.7 Synchronization
+
+Cluster uses a `threading.Lock` for internal consistency and a `Condition` variable to allow blocking waits:
+
+- `await_available(timeout=None)`  
+  Blocks until server availability changes (used by schedulers).
+
+Watch callbacks hold the lock and wake all waiters.
+
+### 9.8 Failure Modes & Constraints
+
+- Cluster assumes Metastore guarantees watch recovery after reconnect.
+- If inconsistency occurs (e.g., missing info during a watch callback), the change is ignored until the next event.
+- Cluster does not persist state; it is fully reconstructed on each process startup from ZooKeeper.
+
+### 9.9 Non‑Goals
+
+- Cluster does not handle inter‑server communication.
+- Cluster does not manage processes, simulation nodes, or event routing.
+- Cluster does not provide strong consistency beyond ZooKeeper's guarantees.
