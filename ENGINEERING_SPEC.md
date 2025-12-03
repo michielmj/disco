@@ -413,7 +413,7 @@ The `ServerRouter` owns one or more transports and chooses which one to use for 
 
 - The target node.
 - The current replication id (`repid`).
-- Cluster metadata (address book and local address).
+- Cluster metadata (address book only; transports do not maintain replication state internally).
 
 Conceptual skeleton:
 
@@ -428,7 +428,7 @@ class ServerRouter:
         self,
         cluster: Cluster,
         transports: list[Transport],
-        repid: int,
+        repid: str,
     ) -> None:
         self._cluster = cluster
         self._transports = transports
@@ -442,11 +442,11 @@ class ServerRouter:
 
     def send_event(self, envelope: EventEnvelope) -> None:
         transport = self._choose_transport(envelope.target_node)
-        transport.send_event(envelope)
+        transport.send_event(self._repid, envelope)
 
     def send_promise(self, envelope: PromiseEnvelope) -> None:
         transport = self._choose_transport(envelope.target_node)
-        transport.send_promise(envelope)
+        transport.send_promise(self._repid, envelope)
 ```
 
 ### 5.4 Transport Interface & Selection
@@ -461,9 +461,9 @@ from ..envelopes import EventEnvelope, PromiseEnvelope
 
 
 class Transport(Protocol):
-    def handles_node(self, repid: int, node: str) -> bool: ...
-    def send_event(self, envelope: EventEnvelope) -> None: ...
-    def send_promise(self, envelope: PromiseEnvelope) -> None: ...
+    def handles_node(self, repid: str, node: str) -> bool: ...
+    def send_event(self, repid: str, envelope: EventEnvelope) -> None: ...
+    def send_promise(self, repid: str, envelope: PromiseEnvelope) -> None: ...
 ```
 
 Typical policies:
@@ -490,24 +490,21 @@ class InProcessTransport(Transport):
     def __init__(
         self,
         nodes: Mapping[str, NodeController],
-        repid: int,
         cluster: Cluster,
     ) -> None:
         self._nodes = nodes
-        self._repid = repid
         self._cluster = cluster
 
-    def handles_node(self, repid: int, node: str) -> bool:
+    def handles_node(self, repid: str, node: str) -> bool:
         if node not in self._nodes:
             return False
-        addr = self._cluster.address_book.get((repid, node))
-        return addr == self._cluster.local_address
+        return (repid, node) in self._cluster.address_book
 
-    def send_event(self, envelope: EventEnvelope) -> None:
+    def send_event(self, repid: str, envelope: EventEnvelope) -> None:
         node = self._nodes[envelope.target_node]
         node.receive_event(envelope)
 
-    def send_promise(self, envelope: PromiseEnvelope) -> None:
+    def send_promise(self, repid: str, envelope: PromiseEnvelope) -> None:
         node = self._nodes[envelope.target_node]
         node.receive_promise(envelope)
 ```
@@ -526,7 +523,7 @@ promise_queues: Mapping[str, multiprocessing.Queue]  # address -> inbound promis
 
 Each application process has its own `address` (for example `"127.0.0.1:5001"`). The IPC transport is constructed with:
 
-- `cluster` (for `address_book` and `local_address`),
+- `cluster` (for `address_book`),
 - `event_queues` and `promise_queues` for all addresses on the same machine that are reachable via IPC,
 - a `large_payload_threshold` for deciding when to use `SharedMemory`.
 
@@ -594,11 +591,9 @@ class IPCTransport(Transport):
 Method `handles_node` decides if a node should be reached via IPC:
 
 ```python
-def handles_node(self, repid: int, node: str) -> bool:
+def handles_node(self, repid: str, node: str) -> bool:
     addr = self._cluster.address_book.get((repid, node))
     if addr is None:
-        return False
-    if addr == self._cluster.local_address:
         return False
     return addr in self._event_queues and addr in self._promise_queues
 ```
@@ -654,7 +649,7 @@ The gRPC transport is responsible for delivering envelopes to nodes on other mac
 
 - A node is handled by gRPC if:
   - `handles_node` returns `True` for the gRPC transport, and
-  - Its address is neither `local_address` nor present in the IPC queue mappings.
+  - Its address is not handled by the in-process or IPC transports based on their `handles_node` checks.
 
 Promises should be prioritized over events on the wire (for example via separate streams or explicit prioritisation in the client).
 
@@ -663,7 +658,7 @@ Promises should be prioritized over events on the wire (for example via separate
 Tests should cover at least:
 
 - Correct resolution of `"self"` targets in `NodeController`.
-- Local versus remote routing decisions based on `Cluster.address_book` and `local_address`.
+- Local versus remote routing decisions based on `Cluster.address_book` and transport `handles_node` rules.
 - `Transport.handles_node` implementations for in-process, IPC, and gRPC transports.
 - Inline versus SharedMemory payload handling in the IPC transport.
 - Correct reconstruction of `EventEnvelope` and `PromiseEnvelope` in the IPC receiver.

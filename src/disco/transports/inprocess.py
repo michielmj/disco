@@ -1,32 +1,32 @@
 from __future__ import annotations
 
-"""In-process transport implementation."""
+"""In-process transport that routes to local NodeControllers."""
 
 from dataclasses import dataclass
 from typing import Mapping
 
+from ..cluster import Cluster
+from ..envelopes import EventEnvelope, PromiseEnvelope
 from ..node_controller import NodeController
 from .base import Transport
 
 
 @dataclass(slots=True)
 class InProcessTransport(Transport):
-    """Transport that directly invokes peer :class:`NodeController`s."""
+    """Deliver envelopes to NodeControllers registered in the same process."""
 
-    peers: Mapping[str, NodeController]
+    nodes: Mapping[str, NodeController]
+    cluster: Cluster
 
-    def handles_node(self, node_name: str) -> bool:
-        return node_name in self.peers
+    def handles_node(self, repid: str, node: str) -> bool:
+        if node not in self.nodes:
+            return False
+        return (repid, node) in self.cluster.address_book
 
-    def send_event(self, target_node: str, payload: bytes) -> None:
-        peer = self._resolve_peer(target_node)
-        peer.receive_event(payload)
+    def send_event(self, repid: str, envelope: EventEnvelope) -> None:
+        node = self.nodes[envelope.target_node]
+        node.receive_event(envelope)
 
-    def send_promise(self, target_node: str, payload: bytes) -> None:
-        peer = self._resolve_peer(target_node)
-        peer.receive_promise(payload)
-
-    def _resolve_peer(self, target_node: str) -> NodeController:
-        if target_node not in self.peers:
-            raise ValueError(f"unknown peer node {target_node}")
-        return self.peers[target_node]
+    def send_promise(self, repid: str, envelope: PromiseEnvelope) -> None:
+        node = self.nodes[envelope.target_node]
+        node.receive_promise(envelope)

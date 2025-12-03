@@ -3,16 +3,20 @@ from __future__ import annotations
 import pickle
 from typing import Any
 
-import pytest
-
 from disco.envelopes import EventEnvelope, PromiseEnvelope
 from disco.node_controller import NodeController
-from disco.router import Router
+from disco.router import ServerRouter
 from disco.transports.inprocess import InProcessTransport
 
 
+class FakeCluster:
+    def __init__(self) -> None:
+        self.address_book: dict[tuple[str, str], str] = {}
+
+
 def test_local_event_delivery() -> None:
-    router = Router()
+    cluster = FakeCluster()
+    router = ServerRouter(cluster=cluster, transports=[], repid="1")
     controller = NodeController("alpha", router)
 
     captured: list[EventEnvelope] = []
@@ -28,12 +32,13 @@ def test_local_event_delivery() -> None:
     envelope = captured[0]
     assert envelope.target_node == "alpha"
     assert envelope.target_simproc == "main"
-    assert envelope.data == b"payload"
+    assert envelope.data == pickle.dumps(b"payload")
     assert envelope.headers == {"k": "v"}
 
 
 def test_self_alias_uses_local_delivery() -> None:
-    router = Router()
+    cluster = FakeCluster()
+    router = ServerRouter(cluster=cluster, transports=[], repid="2")
     controller = NodeController("gamma", router)
 
     captured: list[EventEnvelope] = []
@@ -52,16 +57,21 @@ def test_self_alias_uses_local_delivery() -> None:
 
 
 def test_remote_event_serialization_once() -> None:
-    router = Router()
-    sender = NodeController("alpha", router)
-    receiver = NodeController("beta", router)
+    cluster = FakeCluster()
+    cluster.address_book[("1", "beta")] = "local"
 
     received: list[EventEnvelope] = []
 
     def record(envelope: EventEnvelope) -> None:
         received.append(envelope)
 
+    receiver_router = ServerRouter(cluster=cluster, transports=[], repid="1")
+    receiver = NodeController("beta", receiver_router)
     receiver._deliver_local_event = record
+
+    transport = InProcessTransport(nodes={"beta": receiver}, cluster=cluster)
+    sender_router = ServerRouter(cluster=cluster, transports=[transport], repid="1")
+    sender = NodeController("alpha", sender_router)
 
     calls: list[bytes] = []
 
@@ -69,31 +79,31 @@ def test_remote_event_serialization_once() -> None:
         calls.append(b"call")
         return pickle.dumps(obj)
 
-    sender._serializer = serializer
+    sender.serializer = serializer
 
     sender.send_event("beta/main", epoch=3.0, data=b"remote")
 
     assert len(calls) == 1
     assert len(received) == 1
-    assert received[0].data == b"remote"
+    assert pickle.loads(received[0].data) == b"remote"
 
 
 def test_remote_promise_via_transport() -> None:
-    router_a = Router()
-    router_b = Router()
-
-    sender = NodeController("alpha", router_a)
-    receiver = NodeController("beta", router_b)
+    cluster = FakeCluster()
+    cluster.address_book[("1", "beta")] = "local"
 
     received_promises: list[PromiseEnvelope] = []
 
     def record_promise(envelope: PromiseEnvelope) -> None:
         received_promises.append(envelope)
 
+    receiver_router = ServerRouter(cluster=cluster, transports=[], repid="1")
+    receiver = NodeController("beta", receiver_router)
     receiver._deliver_local_promise = record_promise
 
-    transport = InProcessTransport({"beta": receiver})
-    router_a.register_transport(transport)
+    transport = InProcessTransport(nodes={"beta": receiver}, cluster=cluster)
+    sender_router = ServerRouter(cluster=cluster, transports=[transport], repid="1")
+    sender = NodeController("alpha", sender_router)
 
     sender.send_promise("beta/control", seqnr=7, epoch=4.5, num_events=2)
 
@@ -104,25 +114,26 @@ def test_remote_promise_via_transport() -> None:
 
 
 def test_remote_event_through_transport() -> None:
-    router_a = Router()
-    router_b = Router()
-
-    sender = NodeController("alpha", router_a)
-    receiver = NodeController("beta", router_b)
+    cluster = FakeCluster()
+    cluster.address_book[("1", "beta")] = "local"
 
     received: list[EventEnvelope] = []
 
     def record(envelope: EventEnvelope) -> None:
         received.append(envelope)
 
+    receiver_router = ServerRouter(cluster=cluster, transports=[], repid="1")
+    receiver = NodeController("beta", receiver_router)
     receiver._deliver_local_event = record
 
-    transport = InProcessTransport({"beta": receiver})
-    router_a.register_transport(transport)
+    transport = InProcessTransport(nodes={"beta": receiver}, cluster=cluster)
+    sender_router = ServerRouter(cluster=cluster, transports=[transport], repid="1")
+    sender = NodeController("alpha", sender_router)
 
     sender.send_event("beta/main", epoch=5.0, data=b"via-transport")
 
     assert len(received) == 1
     envelope = received[0]
     assert envelope.target_node == "beta"
-    assert envelope.data == b"via-transport"
+    assert envelope.target_simproc == "main"
+    assert envelope.data == pickle.dumps(b"via-transport")

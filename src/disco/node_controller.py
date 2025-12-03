@@ -1,4 +1,4 @@
-"""NodeController skeleton responsible for serialization and routing."""
+"""NodeController responsible for serialization and routing."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import pickle
 from typing import Any, Callable
 
 from .envelopes import EventEnvelope, PromiseEnvelope
-from .router import Router
+from .router import ServerRouter
 
 
 def _noop_event(_: EventEnvelope) -> None:
@@ -18,14 +18,13 @@ def _noop_promise(_: PromiseEnvelope) -> None:
     """Default no-op for local promise handling."""
 
 
-@dataclass
+@dataclass(slots=True)
 class NodeController:
     """Manage sending and receiving events and promises for a node."""
 
     node_name: str
-    router: Router
-    _serializer: Callable[[Any], bytes] = field(default=pickle.dumps)
-    _deserializer: Callable[[bytes], Any] = field(default=pickle.loads)
+    router: ServerRouter
+    serializer: Callable[[Any], bytes] = field(default=pickle.dumps)
     _deliver_local_event: Callable[[EventEnvelope], None] = field(
         default=_noop_event, repr=False
     )
@@ -34,34 +33,30 @@ class NodeController:
     )
 
     def __post_init__(self) -> None:
-        self.router.register_node(self)
+        pass
 
     def send_event(
         self,
         target: str,
         epoch: float,
-        data: bytes,
+        data: Any,
         headers: dict[str, str] | None = None,
     ) -> None:
-        """Send an event to ``target`` ("<node>/<simproc>" or ``"self"`` alias)."""
-
         target_node, target_simproc = self._parse_target(target)
+        payload = self.serializer(data)
         envelope = EventEnvelope(
             target_node=target_node,
             target_simproc=target_simproc,
             epoch=epoch,
-            data=data,
+            data=payload,
             headers=headers or {},
         )
         if target_node == self.node_name:
             self._deliver_local_event(envelope)
         else:
-            payload = self._serialize_event_envelope(envelope)
-            self.router.route_event(target_node, payload)
+            self.router.send_event(envelope)
 
     def send_promise(self, target: str, seqnr: int, epoch: float, num_events: int) -> None:
-        """Send a promise to ``target`` ("<node>/<simproc>" or ``"self"`` alias)."""
-
         target_node, target_simproc = self._parse_target(target)
         envelope = PromiseEnvelope(
             target_node=target_node,
@@ -73,19 +68,12 @@ class NodeController:
         if target_node == self.node_name:
             self._deliver_local_promise(envelope)
         else:
-            payload = self._serialize_promise_envelope(envelope)
-            self.router.route_promise(target_node, payload)
+            self.router.send_promise(envelope)
 
-    def receive_event(self, payload: bytes) -> None:
-        """Receive a serialized event from a transport or router."""
-
-        envelope = self._deserialize_event_envelope(payload)
+    def receive_event(self, envelope: EventEnvelope) -> None:
         self._deliver_local_event(envelope)
 
-    def receive_promise(self, payload: bytes) -> None:
-        """Receive a serialized promise from a transport or router."""
-
-        envelope = self._deserialize_promise_envelope(payload)
+    def receive_promise(self, envelope: PromiseEnvelope) -> None:
         self._deliver_local_promise(envelope)
 
     def _parse_target(self, target: str) -> tuple[str, str]:
@@ -96,21 +84,3 @@ class NodeController:
         if not target_simproc:
             raise ValueError("simproc must be provided")
         return resolved_node, target_simproc
-
-    def _serialize_event_envelope(self, envelope: EventEnvelope) -> bytes:
-        return self._serializer(envelope)
-
-    def _serialize_promise_envelope(self, envelope: PromiseEnvelope) -> bytes:
-        return self._serializer(envelope)
-
-    def _deserialize_event_envelope(self, payload: bytes) -> EventEnvelope:
-        envelope = self._deserializer(payload)
-        if not isinstance(envelope, EventEnvelope):
-            raise TypeError("deserialized payload is not EventEnvelope")
-        return envelope
-
-    def _deserialize_promise_envelope(self, payload: bytes) -> PromiseEnvelope:
-        envelope = self._deserializer(payload)
-        if not isinstance(envelope, PromiseEnvelope):
-            raise TypeError("deserialized payload is not PromiseEnvelope")
-        return envelope
