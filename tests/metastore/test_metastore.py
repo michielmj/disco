@@ -63,7 +63,13 @@ class FakeKazooClient:
         self.data[path] = value
 
     # noinspection PyUnusedLocal
-    def create(self, path: str, value: bytes, makepath: bool = False) -> None:
+    def create(
+        self,
+        path: str,
+        value: bytes,
+        makepath: bool = False,
+        ephemeral: bool = False,   # <-- added, ignored
+    ) -> None:
         self.data[path] = value
 
     # noinspection PyUnusedLocal
@@ -110,10 +116,15 @@ class FakeConnectionManager:
         self._client = client
         self.watch_registrations: list[tuple[str, Callable]] = []
         self.children_watch_registrations: list[tuple[str, Callable]] = []
+        self._stopped = False  # <- new
 
     @property
     def client(self) -> FakeKazooClient:
         return self._client
+
+    @property
+    def stopped(self) -> bool:  # <- new
+        return self._stopped
 
     def watch_data(self, path: str, callback: Callable[[bytes | None, str], bool]):
         """

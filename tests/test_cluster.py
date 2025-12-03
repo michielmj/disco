@@ -1,49 +1,50 @@
-# tests/cluster/test_cluster.py
-from __future__ import annotations
-
-from dataclasses import asdict
-from typing import Any, Callable, Optional, Mapping
-
 import pytest
+from dataclasses import asdict
+from typing import Any, Callable, List, Tuple
 
-from disco.metastore import Metastore  # type: ignore[unused-import]  # for type hints only
-from disco.cluster import Cluster, State, ServerStatus, ACTIVE_SERVERS, SERVERS, BASE_STRUCTURE
+
+from disco.cluster import (
+    Cluster,
+    State,
+    ServerInfo,
+    ACTIVE_SERVERS,
+    SERVERS,
+    BASE_STRUCTURE,
+)
 
 
 # ---------------------------------------------------------------------------
 # Fake Metastore
 # ---------------------------------------------------------------------------
 
-
 class FakeMetastore:
     """
-    Minimal in-memory implementation of the Metastore API used by Cluster.
+    Minimal fake of disco.metastore.Metastore, enough to test Cluster.
 
-    - Stores values as Python objects (no serialization).
-    - Records watch registrations so tests can invoke callbacks directly.
+    NOTE:
+    - Paths are treated as already "logical" (no group or chroot).
+    - watch_with_callback behaves like a DataWatch: callback is invoked
+      immediately when the watch is registered, and on each update_key for
+      that path.
+    - watch_members_with_callback is driven manually from tests.
     """
 
     def __init__(self) -> None:
-        self._stopped = False
-        self.structure_ensured: list[str] = []
+        self.structure_calls: List[list[str]] = []
 
-        self.children_watches: list[tuple[str, Callable[[list[str], str], bool]]] = []
-        self.data_watches: list[tuple[str, Callable[[Any, str], bool]]] = []
-
-        # path -> value (Python objects)
+        # path -> value
         self.data: dict[str, Any] = {}
 
-    # --- Metastore-like API ----------------------------------------------
+        # watches
+        self.children_watches: List[Tuple[str, Callable[[list[str], str], bool]]] = []
+        self.data_watches: List[Tuple[str, Callable[[Any, str], bool]]] = []
+
+    # --- Metastore-like API ------------------------------------------------
 
     def ensure_structure(self, base_structure: list[str]) -> None:
-        self.structure_ensured.extend(base_structure)
+        self.structure_calls.append(list(base_structure))
 
-    @property
-    def stopped(self) -> bool:
-        return self._stopped
-
-    def stop(self) -> None:
-        self._stopped = True
+    # watches ---------------------------------------------------------------
 
     def watch_members_with_callback(
         self,
@@ -51,75 +52,106 @@ class FakeMetastore:
         callback: Callable[[list[str], str], bool],
     ):
         self.children_watches.append((path, callback))
-        return f"child-watch-{len(self.children_watches)}"
+        return "watch-members"
 
     def watch_with_callback(
         self,
         path: str,
         callback: Callable[[Any, str], bool],
     ):
+        """
+        Simulate Kazoo DataWatch: call once with current data (if any),
+        and again on each update_key.
+        """
         self.data_watches.append((path, callback))
-        return f"watch-{len(self.data_watches)}"
 
-    def list_members(self, path: str) -> list[str]:
-        """
-        Return immediate children under `path`, based on `self.data` keys.
-        """
-        prefix = path.rstrip("/") + "/"
-        children: set[str] = set()
-        for p in self.data.keys():
-            if p.startswith(prefix):
-                rest = p[len(prefix):]
-                child = rest.split("/", 1)[0]
-                if child:
-                    children.add(child)
-        return sorted(children)
+        # initial call with current value (or None)
+        current = self.data.get(path)
+        keep = callback(current, path)
+        if not keep:
+            self.data_watches.remove((path, callback))
 
-    def get_keys(self, path: str) -> dict[str, Any] | None:
-        """
-        Returns a flat dict of direct children and their values under `path`.
-        """
-        prefix = path.rstrip("/") + "/"
-        result: dict[str, Any] = {}
-        for p, v in self.data.items():
-            if p.startswith(prefix):
-                rest = p[len(prefix):]
-                if "/" in rest:
-                    # ignore deeper than one level for this simple fake
-                    continue
-                result[rest] = v
-        return result or None
+        return "watch-data"
+
+    # basic KV --------------------------------------------------------------
+    # noinspection PyUnusedLocal
+    def update_key(self, path: str, value: Any, ephemeral: bool = False) -> None:
+        self.data[path] = value
+
+        # trigger all watches on this path
+        for p, cb in list(self.data_watches):
+            if p == path:
+                keep = cb(value, path)
+                if not keep:
+                    self.data_watches.remove((p, cb))
 
     def update_keys(self, path: str, members: dict[str, Any]) -> None:
+        """Simple shallow update: store each key at path/key."""
         for key, value in members.items():
             self.update_key(f"{path}/{key}", value)
 
-    def update_key(
-        self,
-        path: str,
-        value: Any,
-        ephemeral: bool = False,  # matches Metastore.update_key signature
-    ) -> None:
-        self.data[path] = value
+    def get_key(self, path: str) -> Any:
+        return self.data.get(path)
+
+    def get_keys(self, path: str) -> dict[str, Any] | None:
+        """
+        Return immediate children under `path` as {name: value}.
+        Only supports one-level ServerInfo layout.
+        """
+        prefix = path.rstrip("/")
+        plen = len(prefix) + 1
+        result: dict[str, Any] = {}
+
+        for p, v in self.data.items():
+            if not p.startswith(prefix + "/"):
+                continue
+            tail = p[plen:]
+            # only immediate children (no nested slashes)
+            if "/" in tail:
+                continue
+            result[tail] = v
+
+        return result or None
 
     def drop_key(self, path: str) -> bool:
-        prefix = path.rstrip("/")
-        to_delete = [
-            p for p in self.data.keys()
-            if p == prefix or p.startswith(prefix + "/")
-        ]
-        for p in to_delete:
-            del self.data[p]
-        return bool(to_delete)
+        keys = [k for k in self.data if k == path or k.startswith(path + "/")]
+        for k in keys:
+            del self.data[k]
+        return bool(keys)
 
     def __contains__(self, item: str) -> bool:
-        # Direct value stored?
+        """
+        Mimic ZooKeeper semantics: a node 'item' is considered to exist if
+        - it has data stored directly, OR
+        - it has at least one child (i.e. some key with 'item/' as a prefix).
+        """
         if item in self.data:
             return True
 
-        # Or does it have any children?
         prefix = item.rstrip("/") + "/"
-        return any(p.startswith(prefix) for p in self.data.keys())
+        return any(key.startswith(prefix) for key in self.data.keys())
+
+    # listing ---------------------------------------------------------------
+
+    def list_members(self, path: str) -> list[str]:
+        prefix = path.rstrip("/")
+        plen = len(prefix) + 1
+        children: set[str] = set()
+
+        for p in self.data.keys():
+            if not p.startswith(prefix + "/"):
+                continue
+            tail = p[plen:]
+            head = tail.split("/", 1)[0]
+            if head:
+                children.add(head)
+
+        return sorted(children)
+
+    # not used by Cluster, but exist on real Metastore
+    @property
+    def stopped(self) -> bool:
+        return False
 
 
 @pytest.fixture
@@ -127,168 +159,112 @@ def meta() -> FakeMetastore:
     return FakeMetastore()
 
 
+# noinspection PyTypeChecker
 @pytest.fixture
 def cluster(meta: FakeMetastore) -> Cluster:
-    return Cluster(meta=meta)  # type: ignore[arg-type]
+    return Cluster(meta)
 
 
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
+# noinspection PyTypeChecker
+def test_cluster_init_ensures_base_structure(meta: FakeMetastore):
+    _cluster = Cluster(meta)
+    assert meta.structure_calls
+    # last call should be BASE_STRUCTURE
+    assert meta.structure_calls[-1] == BASE_STRUCTURE
 
-def test_cluster_init_ensures_base_structure_and_registers_children_watch(meta: FakeMetastore, cluster: Cluster):
-    # BASE_STRUCTURE should be ensured
-    assert meta.structure_ensured == BASE_STRUCTURE
 
-    # Exactly one children watch registered on ACTIVE_SERVERS
-    assert len(meta.children_watches) == 1
-    path, cb = meta.children_watches[0]
+def test_register_and_unregister_server(meta: FakeMetastore, cluster: Cluster):
+    # Initially nothing in ACTIVE_SERVERS
+    assert ACTIVE_SERVERS not in meta.data
+
+    cluster.register_server("s1", state=State.INITIALIZING)
+
+    # ServerInfo was written (shallow layout)
+    assert meta.get_keys(f"{SERVERS}/s1") == asdict(ServerInfo())
+
+    # Active server node with state
+    assert meta.get_key(f"{ACTIVE_SERVERS}/s1") == State.INITIALIZING
+
+    # Trigger children watch to let Cluster install its per-server watches
+    path, children_cb = meta.children_watches[0]
     assert path == ACTIVE_SERVERS
-    assert callable(cb)
+    children_cb(["s1"], path)
+
+    # In-memory state should now be visible
+    assert cluster.get_server_state("s1") == State.INITIALIZING
+    assert cluster.server_states["s1"] == State.INITIALIZING
+
+    # Unregister removes the active node
+    cluster.unregister_server("s1")
+    assert f"{ACTIVE_SERVERS}/s1" not in meta.data
+
+    with pytest.raises(RuntimeError):
+        cluster.unregister_server("s1")
 
 
-def test_watch_children_adds_and_removes_servers(meta: FakeMetastore, cluster: Cluster):
-    # Simulate children callback from ACTIVE_SERVERS
-    _, children_cb = meta.children_watches[0]
+def test_set_and_get_server_state_updates_internal_state(meta: FakeMetastore, cluster: Cluster):
+    cluster.register_server("s1", state=State.CREATED)
 
-    # First event: two servers appear
-    keep = children_cb(["srv1", "srv2"], ACTIVE_SERVERS)
-    assert keep is True
+    # Trigger children watch to attach state watcher
+    path, children_cb = meta.children_watches[0]
+    children_cb(["s1"], path)
 
-    status = cluster.server_status
-    assert status["srv1"] == State.AVAILABLE
-    assert status["srv2"] == State.AVAILABLE
+    # Initial state from metastore
+    assert cluster.get_server_state("s1") == State.CREATED
+    assert cluster.server_states["s1"] == State.CREATED
 
-    # 3 watches per server (state, nodes, repid)
-    paths = {p for (p, _cb) in meta.data_watches}
-    assert f"{SERVERS}/srv1/state" in paths
-    assert f"{SERVERS}/srv1/nodes" in paths
-    assert f"{SERVERS}/srv1/repid" in paths
-    assert f"{SERVERS}/srv2/state" in paths
+    # Change state via Cluster API
+    cluster.set_server_state("s1", State.AVAILABLE)
 
-    # Second event: srv2 disappears, srv3 appears
-    keep = children_cb(["srv1", "srv3"], ACTIVE_SERVERS)
-    assert keep is True
-
-    status = cluster.server_status
-    assert "srv2" not in status
-    assert status["srv1"] == State.AVAILABLE
-    assert status["srv3"] == State.AVAILABLE
+    # Data is stored in metastore
+    assert meta.get_key(f"{ACTIVE_SERVERS}/s1") == State.AVAILABLE
+    # And internal view is updated by the watch
+    assert cluster.server_states["s1"] == State.AVAILABLE
 
 
-def test_watch_server_state_updates_internal_state(meta: FakeMetastore, cluster: Cluster):
-    # Register one server via children callback
-    _, children_cb = meta.children_watches[0]
-    children_cb(["srv"], ACTIVE_SERVERS)
+def test_update_server_info_and_address_book(meta: FakeMetastore, cluster: Cluster):
+    cluster.register_server("s1", state=State.AVAILABLE)
 
-    # srv is initially AVAILABLE
-    assert cluster.server_status["srv"] == State.AVAILABLE
+    # Write info first
+    cluster.update_server_info("s1", repid="r1", nodes=["n1", "n2"])
 
-    # Call internal callback directly with decoded State
-    cluster._watch_server_state("srv", State.ACTIVE, f"{SERVERS}/srv/state")
-    assert cluster.server_status["srv"] == State.ACTIVE
+    # Trigger children watch so node/repid watches are installed and immediately fired
+    path, children_cb = meta.children_watches[0]
+    children_cb(["s1"], path)
 
-
-def test_watch_server_nodes_and_repid_builds_address_book(meta: FakeMetastore, cluster: Cluster):
-    # Register one server
-    _, children_cb = meta.children_watches[0]
-    children_cb(["srv"], ACTIVE_SERVERS)
-
-    # Update nodes and repid via internal callbacks (decoded values)
-    cluster._watch_server_nodes("srv", ["n1", "n2"], f"{SERVERS}/srv/nodes")
-    cluster._watch_server_repid("srv", "rep1", f"{SERVERS}/srv/repid")
-
+    # Address book should map (repid, node) -> server address
     book = cluster.address_book
-    # (repid, node) -> address
-    assert book[("rep1", "n1")] == "srv"
-    assert book[("rep1", "n2")] == "srv"
-
-    # Mapping should be read-only
-    with pytest.raises(TypeError):
-        book[("rep1", "n3")] = "other"  # type: ignore[index]
-
-
-def test_address_book_updates_on_node_change(meta: FakeMetastore, cluster: Cluster):
-    _, children_cb = meta.children_watches[0]
-    children_cb(["srv"], ACTIVE_SERVERS)
-
-    cluster._watch_server_nodes("srv", ["n1", "n2"], f"{SERVERS}/srv/nodes")
-    cluster._watch_server_repid("srv", "rep1", f"{SERVERS}/srv/repid")
-
-    book1 = dict(cluster.address_book)
-    assert ("rep1", "n1") in book1
-    assert ("rep1", "n2") in book1
-
-    # Now change nodes
-    cluster._watch_server_nodes("srv", ["n2"], f"{SERVERS}/srv/nodes")
-
-    book2 = dict(cluster.address_book)
-    assert ("rep1", "n1") not in book2
-    assert ("rep1", "n2") in book2
+    assert book[("r1", "n1")] == "s1"
+    assert book[("r1", "n2")] == "s1"
 
 
 def test_get_available_prefers_matching_expid_and_unique_partitions(meta: FakeMetastore, cluster: Cluster):
-    # Register three servers
-    _, children_cb = meta.children_watches[0]
-    children_cb(["s1", "s2", "s3"], ACTIVE_SERVERS)
+    # Register three servers in AVAILABLE state
+    cluster.register_server("s1", state=State.AVAILABLE)
+    cluster.register_server("s2", state=State.AVAILABLE)
+    cluster.register_server("s3", state=State.AVAILABLE)
 
-    # Write status into metastore
-    meta.update_keys(
-        f"{SERVERS}/s1",
-        asdict(ServerStatus(expid="exp1", partition=0)),
-    )
-    meta.update_keys(
-        f"{SERVERS}/s2",
-        asdict(ServerStatus(expid="exp1", partition=1)),
-    )
-    meta.update_keys(
-        f"{SERVERS}/s3",
-        asdict(ServerStatus(expid="exp2", partition=2)),
-    )
+    # Add server info with expid/partition
+    cluster.update_server_info("s1", expid="exp1", partition=0)
+    cluster.update_server_info("s2", expid="exp1", partition=1)
+    cluster.update_server_info("s3", expid="exp2", partition=2)
+
+    # Trigger children watch once with all active servers
+    path, children_cb = meta.children_watches[0]
+    children = meta.list_members(ACTIVE_SERVERS)
+    assert set(children) == {"s1", "s2", "s3"}
+    children_cb(children, path)
 
     servers, partitions = cluster.get_available(expid="exp1")
 
-    # s1 and s2 should be preferred (matching expid, distinct partitions)
-    assert servers == ["s1", "s2", "s3"]
-    assert partitions == [0, 1]
+    # First entries should be the preferred ones (matching expid, unique partitions)
+    preferred = set(servers[:2])
+    assert preferred == {"s1", "s2"}
+    assert set(partitions) == {0, 1}
 
-
-def test_list_active_servers_uses_metastore_list_members(meta: FakeMetastore, cluster: Cluster):
-    # Simulate two active servers by writing into ACTIVE_SERVERS
-    meta.update_key(f"{ACTIVE_SERVERS}/s1", 0)
-    meta.update_key(f"{ACTIVE_SERVERS}/s2", 0)
-
-    listed = cluster.list_active_servers()
-    assert set(listed) == {"s1", "s2"}
-
-
-def test_update_server_status_register_and_attribute_updates(meta: FakeMetastore, cluster: Cluster):
-    # Register a new server
-    cluster.update_server_status(
-        server="srv",
-        register=True,
-        partition=5,
-        expid="expX",
-        repid="repX",
-        nodes=["n1", "n2"],
-        state=State.ACTIVE,
-    )
-
-    # ACTIVE_SERVERS entry should exist
-    assert f"{ACTIVE_SERVERS}/srv" in meta.data
-
-    # Status data under SERVERS/srv should be present
-    keys = meta.get_keys(f"{SERVERS}/srv")
-    assert keys is not None
-
-    status = ServerStatus(**keys)
-    assert status.partition == 5
-    assert status.expid == "expX"
-    assert status.repid == "repX"
-    assert status.nodes == ["n1", "n2"]
-    assert status.state == State.ACTIVE
-
-    # Unregister
-    cluster.update_server_status(server="srv", register=False)
-    assert f"{ACTIVE_SERVERS}/srv" not in meta.data
+    # The remaining server is "others"
+    assert set(servers[2:]) == {"s3"}

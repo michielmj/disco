@@ -3,7 +3,7 @@ from __future__ import annotations
 import pickle
 import uuid
 from time import sleep, time
-from typing import Any, Callable, Dict, Optional, TypeAlias, cast
+from typing import Any, Callable, Optional, cast
 
 from kazoo.client import KazooClient
 
@@ -14,6 +14,16 @@ from .helpers import ZkConnectionManager
 QUEUE_POLLING_S = 0.05   # polling for Kazoo queues
 
 logger = getLogger(__name__)
+
+
+class MetastoreError(Exception):
+    """Base exception for Metastore-related errors."""
+    pass
+
+
+class MetastoreStoppedError(MetastoreError):
+    """Raised when operations are attempted on a stopped Metastore."""
+    pass
 
 
 class Metastore:
@@ -32,7 +42,7 @@ class Metastore:
         group: Optional[str] = None,
         packb: Callable[[Any], bytes] = pickle.dumps,
         unpackb: Callable[[bytes], Any] = pickle.loads,
-        base_structure: Optional[list[str]] = None
+        base_structure: Optional[list[str]] = None,
     ) -> None:
         self._connection = connection
         self._group = group
@@ -52,14 +62,28 @@ class Metastore:
     # Internal helpers
     # ----------------------------------------------------------------------
 
-    def ensure_structure(self, base_structure: list[str]):
-        # Ensure base structure under chroot + optional /<group>
+    def _ensure_running(self) -> None:
+        """
+        Ensure that the underlying connection manager has not been stopped.
+        """
+        if self.stopped:
+            raise MetastoreStoppedError("Metastore connection manager has been stopped.")
+
+    def ensure_structure(self, base_structure: list[str]) -> None:
+        """
+        Ensure `base_structure` paths exist under the chroot + optional /<group>.
+        """
+        if not base_structure:
+            return
+
+        self._ensure_running()
         for path in base_structure:
             full = self._full_path(path)
             self.client.ensure_path(full)
 
     @property
     def client(self) -> KazooClient:
+        self._ensure_running()
         return self._connection.client
 
     @property
@@ -91,6 +115,7 @@ class Metastore:
         Register a watch on `path`. Callback receives (decoded_value, full_path).
         If callback returns False, the watch is removed.
         """
+        self._ensure_running()
         full_path = self._full_path(path)
 
         def _wrapped(raw: Optional[bytes], p: str) -> bool:
@@ -114,6 +139,7 @@ class Metastore:
         - `callback(children, full_path)` is called when the children list changes.
         - If callback returns False, the watch is removed.
         """
+        self._ensure_running()
         full_path = self._full_path(path)
 
         def _wrapped(children: Optional[list[str]], p: str) -> bool:
@@ -129,6 +155,7 @@ class Metastore:
     # ----------------------------------------------------------------------
 
     def get_key(self, path: str) -> Any:
+        self._ensure_running()
         full_path = self._full_path(path)
 
         if not self.client.exists(full_path):
@@ -143,6 +170,7 @@ class Metastore:
         return self.get_key(item)
 
     def update_key(self, path: str, value: Any, ephemeral: bool = False) -> None:
+        self._ensure_running()
         full_path = self._full_path(path)
         data = self._packb(value)
 
@@ -152,6 +180,7 @@ class Metastore:
             self.client.create(full_path, data, makepath=True, ephemeral=ephemeral)
 
     def drop_key(self, path: str) -> bool:
+        self._ensure_running()
         full_path = self._full_path(path)
         if self.client.exists(full_path):
             self.client.delete(full_path, recursive=True)
@@ -159,9 +188,11 @@ class Metastore:
         return False
 
     def __contains__(self, item: str) -> bool:
+        self._ensure_running()
         return bool(self.client.exists(self._full_path(item)))
 
     def list_members(self, path: str) -> list[str]:
+        self._ensure_running()
         return cast(list[str], self.client.get_children(self._full_path(path)))
 
     # ----------------------------------------------------------------------
@@ -169,15 +200,16 @@ class Metastore:
     # ----------------------------------------------------------------------
 
     def get_keys(
-            self,
-            path: str,
-            expand: dict[str, Any] | None = None,
+        self,
+        path: str,
+        expand: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """
         Returns all keys and values found at the logical path `path`.
 
         `expand` is a nested dict with the same semantics as in update_keys.
         """
+        self._ensure_running()
         full_path = self._full_path(path)
 
         if not self.client.exists(full_path):
@@ -237,6 +269,7 @@ class Metastore:
           members = {"replications": {"assignments": {"a": 1}}}
           -> "/replications/assignments" = {"a": 1}
         """
+        self._ensure_running()
         full_path = self._full_path(path)
 
         if drop and self.client.exists(full_path):
@@ -273,11 +306,13 @@ class Metastore:
     # ----------------------------------------------------------------------
 
     def enqueue(self, path: str, value: Any) -> None:
+        self._ensure_running()
         full_path = self._full_path(path)
         queue = self.client.Queue(full_path)
         queue.put(self._packb(value))
 
     def dequeue(self, path: str, timeout: Optional[float] = None) -> Any:
+        self._ensure_running()
         full_path = self._full_path(path)
         queue = self.client.Queue(full_path)
 

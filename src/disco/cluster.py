@@ -1,7 +1,7 @@
 from functools import partial
-from threading import Condition, Lock
+from threading import Condition, RLock
 from dataclasses import dataclass, field
-from typing import Mapping
+from typing import Mapping, cast
 
 from enum import IntEnum
 from types import MappingProxyType
@@ -24,12 +24,11 @@ class State(IntEnum):
 
 
 @dataclass
-class ServerStatus:
+class ServerInfo:
     expid: str | None = None
     repid: str | None = None
     partition: int | None = None
     nodes: list[str] = field(default_factory=list)
-    state: State = State.CREATED
 
 
 PROCESSES = "/simulation/processes"
@@ -76,7 +75,7 @@ class Cluster:
         # Ensure base structure is present
         self.meta.ensure_structure(BASE_STRUCTURE)
 
-        self._lock = Lock()
+        self._lock = RLock()
         # Condition uses the same lock as server_state for consistency
         self._available_condition = Condition(self._lock)
 
@@ -101,9 +100,6 @@ class Cluster:
         - Remove servers that disappeared.
         - Add new servers and start watching their state/nodes/repid.
         """
-        if self.meta.stopped:
-            return True  # keep watch, but do nothing
-
         with self._lock:
             current = set(self._server_state.keys())
             incoming = set(children)
@@ -118,12 +114,14 @@ class Cluster:
                 self._address_book_uptodate = False
 
             for address in appends:
-                # New server becomes AVAILABLE by default
-                self._server_state[address] = State.AVAILABLE
+                # Seed in-memory structures so watch callbacks don't early-return.
+                self._server_state[address] = State.CREATED
+                self._server_nodes[address] = []
+                self._server_repids[address] = ""
 
                 # Watch individual paths (logical paths, no leading "/")
                 self.meta.watch_with_callback(
-                    f"{SERVERS}/{address}/state",
+                    f"{ACTIVE_SERVERS}/{address}",
                     partial(self._watch_server_state, address),
                 )
                 self.meta.watch_with_callback(
@@ -145,9 +143,6 @@ class Cluster:
         """
         Called with decoded `state` (State enum) by Metastore.
         """
-        if self.meta.stopped:
-            return False
-
         with self._lock:
             if address not in self._server_state:
                 # Server has been removed; stop watching
@@ -162,9 +157,6 @@ class Cluster:
         """
         Called with decoded `nodes` (list[str]) by Metastore.
         """
-        if self.meta.stopped:
-            return False
-
         with self._lock:
             if address not in self._server_state:
                 return False
@@ -178,9 +170,6 @@ class Cluster:
         """
         Called with decoded `repid` (str) by Metastore.
         """
-        if self.meta.stopped:
-            return False
-
         with self._lock:
             if address not in self._server_state:
                 return False
@@ -214,10 +203,7 @@ class Cluster:
             return MappingProxyType(dict(self._address_book))
 
     @property
-    def server_status(self) -> Mapping[str, State]:
-        if self.meta.stopped:
-            raise RuntimeError("Metastore stopped.")
-
+    def server_states(self) -> Mapping[str, State]:
         with self._lock:
             return MappingProxyType(dict(self._server_state))
 
@@ -231,9 +217,6 @@ class Cluster:
 
         Returns True if notified, False on timeout.
         """
-        if self.meta.stopped:
-            raise RuntimeError("Metastore stopped.")
-
         with self._available_condition:
             return self._available_condition.wait(timeout=timeout)
 
@@ -248,9 +231,6 @@ class Cluster:
           - full_status.expid == expid
           - each partition used at most once in the preferred list
         """
-        if self.meta.stopped:
-            raise RuntimeError("Metastore already stopped.")
-
         preferred: list[str] = []
         others: list[str] = []
         partitions: list[int] = []
@@ -258,7 +238,7 @@ class Cluster:
         with self._lock:
             for address, state in self._server_state.items():
                 if state == State.AVAILABLE:
-                    full_status = self.load_server_status(address)
+                    full_status = self.get_server_info(address)
                     if (
                         full_status.expid == expid
                         and full_status.partition is not None
@@ -275,55 +255,77 @@ class Cluster:
     # Metadata helpers
     # ------------------------------------------------------------------ #
 
-    def list_active_servers(self) -> list[str]:
-        return self.meta.list_members(ACTIVE_SERVERS)
-
-    def load_server_status(self, address: str) -> ServerStatus:
+    def get_server_info(self, address: str) -> ServerInfo:
         path = f"{SERVERS}/{address}"
         if path not in self.meta:
-            raise KeyError(f"Server `{address}` never registered.")
+            raise KeyError(f"Server `{address}` not registered.")
 
         data = self.meta.get_keys(path)
         if data is None:
-            raise KeyError(f"Server `{address}` has no status data.")
-        return ServerStatus(**data)
+            raise KeyError(f"Server `{address}` has no info.")
+        return ServerInfo(**data)
 
-    def update_server_status(
+    def register_server(self, server: str, state: State = State.CREATED):
+        """
+        Registers a server.
+        """
+        active_path = f"{ACTIVE_SERVERS}/{server}"
+        if active_path in self.meta:
+            raise RuntimeError(f"Server {server} already registered.")
+
+        # Initialize default status under SERVERS/<server>
+        self.meta.update_keys(
+            f"{SERVERS}/{server}", ServerInfo().__dict__
+        )
+        # Ephemeral node marks this server as active
+        self.meta.update_key(active_path, state, ephemeral=True)
+
+    def unregister_server(self, server: str):
+        active_path = f"{ACTIVE_SERVERS}/{server}"
+        if active_path in self.meta:
+            self.meta.drop_key(active_path)
+        else:
+            raise RuntimeError(f"Server {server} not registered.")
+
+    def set_server_state(self, server: str, state: State):
+        active_path = f"{ACTIVE_SERVERS}/{server}"
+        if active_path not in self.meta:
+            raise RuntimeError(f"Server {server} not registered.")
+
+        self.meta.update_key(active_path, state)
+
+    def get_server_state(self, server: str) -> State:
+        active_path = f"{ACTIVE_SERVERS}/{server}"
+        if active_path not in self.meta:
+            raise RuntimeError(f"Server {server} not registered.")
+
+        raw = self.meta.get_key(active_path)
+        if raw is None:
+            raise RuntimeError(f"Server {server} has no state set.")
+
+        return cast(State, raw)
+
+    def update_server_info(
         self,
         server: str,
-        register: bool | None = None,
         partition: int | None = None,
         expid: str | None = None,
         repid: str | None = None,
         nodes: list[str] | None = None,
-        state: State | None = None,
     ) -> None:
         """
-        Registers/unregisters a server and updates individual attributes.
+        Updates server info.
         """
-        # Register / unregister in ACTIVE_SERVERS
-        if register is not None:
-            active_path = f"{ACTIVE_SERVERS}/{server}"
-            if active_path in self.meta:
-                self.meta.drop_key(active_path)
-            if register:
-                # Initialize default status under SERVERS/<server>
-                self.meta.update_keys(
-                    f"{SERVERS}/{server}", ServerStatus().__dict__
-                )
-                # Ephemeral node marks this server as active
-                self.meta.update_key(active_path, 0, ephemeral=True)
+        server_path = f"{SERVERS}/{server}"
 
-        # Update individual attributes
         for att, name in (
             (partition, "partition"),
             (expid, "expid"),
             (repid, "repid"),
             (nodes, "nodes"),
-            (state, "state"),
         ):
             if att is not None:
-                self.meta.update_key(f"{SERVERS}/{server}/{name}", att)
+                self.meta.update_key(f"{server_path}/{name}", att)
 
     # ------------------------------------------------------------------ #
     # Logging hook
@@ -337,4 +339,3 @@ class Cluster:
         meta: Metastore | None = None,
     ) -> None:
         ...
-    
