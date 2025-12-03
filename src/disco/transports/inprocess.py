@@ -16,7 +16,6 @@ class InProcessTransport(Transport):
     """Deliver envelopes to NodeControllers registered in the same process."""
 
     nodes: Mapping[str, NodeController]
-    repid: str
     cluster: Cluster
 
     def handles_node(self, repid: str, node: str) -> bool:
@@ -24,10 +23,10 @@ class InProcessTransport(Transport):
             return False
         return (repid, node) in self.cluster.address_book
 
-    def send_event(self, envelope: EventEnvelope) -> None:
+    def send_event(self, repid: str, envelope: EventEnvelope) -> None:
         node = self.nodes[envelope.target_node]
         node.receive_event(envelope)
 
-    def send_promise(self, envelope: PromiseEnvelope) -> None:
+    def send_promise(self, repid: str, envelope: PromiseEnvelope) -> None:
         node = self.nodes[envelope.target_node]
         node.receive_promise(envelope)

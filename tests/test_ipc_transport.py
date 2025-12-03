@@ -48,7 +48,7 @@ def test_ipc_egress_small_inline_event() -> None:
         headers={"k": "v"},
     )
 
-    transport.send_event(envelope)
+    transport.send_event("1", envelope)
     msg = event_queue.get()
 
     assert msg.data == b"small"
@@ -80,7 +80,7 @@ def test_ipc_egress_large_shm_event() -> None:
         headers={},
     )
 
-    transport.send_event(envelope)
+    transport.send_event("1", envelope)
     msg = event_queue.get()
 
     assert msg.data is None
@@ -117,7 +117,7 @@ def test_ipc_egress_send_promise() -> None:
         num_events=2,
     )
 
-    transport.send_promise(envelope)
+    transport.send_promise("1", envelope)
     msg = promise_queue.get()
 
     assert msg.seqnr == 5

@@ -69,7 +69,7 @@ def test_remote_event_serialization_once() -> None:
     receiver = NodeController("beta", receiver_router)
     receiver._deliver_local_event = record
 
-    transport = InProcessTransport(nodes={"beta": receiver}, repid="1", cluster=cluster)
+    transport = InProcessTransport(nodes={"beta": receiver}, cluster=cluster)
     sender_router = ServerRouter(cluster=cluster, transports=[transport], repid="1")
     sender = NodeController("alpha", sender_router)
 
@@ -101,7 +101,7 @@ def test_remote_promise_via_transport() -> None:
     receiver = NodeController("beta", receiver_router)
     receiver._deliver_local_promise = record_promise
 
-    transport = InProcessTransport(nodes={"beta": receiver}, repid="1", cluster=cluster)
+    transport = InProcessTransport(nodes={"beta": receiver}, cluster=cluster)
     sender_router = ServerRouter(cluster=cluster, transports=[transport], repid="1")
     sender = NodeController("alpha", sender_router)
 
@@ -126,7 +126,7 @@ def test_remote_event_through_transport() -> None:
     receiver = NodeController("beta", receiver_router)
     receiver._deliver_local_event = record
 
-    transport = InProcessTransport(nodes={"beta": receiver}, repid="1", cluster=cluster)
+    transport = InProcessTransport(nodes={"beta": receiver}, cluster=cluster)
     sender_router = ServerRouter(cluster=cluster, transports=[transport], repid="1")
     sender = NodeController("alpha", sender_router)
 

@@ -3,7 +3,6 @@ from __future__ import annotations
 """Routing layer for delivering envelopes via registered transports."""
 
 from dataclasses import dataclass
-from typing import Iterable, Mapping
 
 from .cluster import Cluster
 from .envelopes import EventEnvelope, PromiseEnvelope
@@ -28,18 +27,10 @@ class ServerRouter:
 
     def send_event(self, envelope: EventEnvelope) -> None:
         transport = self._choose_transport(envelope.target_node)
-        transport.send_event(envelope)
+        transport.send_event(self.repid, envelope)
 
     def send_promise(self, envelope: PromiseEnvelope) -> None:
         transport = self._choose_transport(envelope.target_node)
-        transport.send_promise(envelope)
+        transport.send_promise(self.repid, envelope)
 
 
-@dataclass(slots=True)
-class LocalNodeRegistry:
-    """A simple registry of locally reachable nodes."""
-
-    nodes: Mapping[str, object]
-
-    def known_nodes(self) -> Iterable[str]:
-        return self.nodes.keys()

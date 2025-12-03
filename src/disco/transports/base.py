@@ -13,8 +13,8 @@ class Transport(Protocol):
     def handles_node(self, repid: str, node: str) -> bool:
         """Return whether this transport can reach ``(repid, node)``."""
 
-    def send_event(self, envelope: EventEnvelope) -> None:
+    def send_event(self, repid: str, envelope: EventEnvelope) -> None:
         """Send an :class:`~disco.envelopes.EventEnvelope`."""
 
-    def send_promise(self, envelope: PromiseEnvelope) -> None:
+    def send_promise(self, repid: str, envelope: PromiseEnvelope) -> None:
         """Send a :class:`~disco.envelopes.PromiseEnvelope`."""

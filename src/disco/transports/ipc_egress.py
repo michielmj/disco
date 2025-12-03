@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from multiprocessing import Queue
 from multiprocessing.shared_memory import SharedMemory
-from typing import Mapping, Optional
+from typing import Mapping
 
 from ..cluster import Cluster
 from ..envelopes import EventEnvelope, PromiseEnvelope
@@ -25,19 +25,14 @@ class IPCTransport(Transport):
         self._event_queues = event_queues
         self._promise_queues = promise_queues
         self._large_payload_threshold = large_payload_threshold
-        self._last_repid: Optional[str] = None
 
     def handles_node(self, repid: str, node: str) -> bool:
         addr = self._cluster.address_book.get((repid, node))
         if addr is None:
             return False
-        can_handle = addr in self._event_queues and addr in self._promise_queues
-        if can_handle:
-            self._last_repid = repid
-        return can_handle
+        return addr in self._event_queues and addr in self._promise_queues
 
-    def send_event(self, envelope: EventEnvelope) -> None:
-        repid = self._require_repid()
+    def send_event(self, repid: str, envelope: EventEnvelope) -> None:
         addr = self._cluster.address_book[(repid, envelope.target_node)]
         queue = self._event_queues[addr]
         if len(envelope.data) <= self._large_payload_threshold:
@@ -64,8 +59,7 @@ class IPCTransport(Transport):
             )
         queue.put(msg)
 
-    def send_promise(self, envelope: PromiseEnvelope) -> None:
-        repid = self._require_repid()
+    def send_promise(self, repid: str, envelope: PromiseEnvelope) -> None:
         addr = self._cluster.address_book[(repid, envelope.target_node)]
         queue = self._promise_queues[addr]
         msg = IPCPromiseMsg(
@@ -76,8 +70,3 @@ class IPCTransport(Transport):
             num_events=envelope.num_events,
         )
         queue.put(msg)
-
-    def _require_repid(self) -> str:
-        if self._last_repid is None:
-            raise KeyError("Replication id not set before send")
-        return self._last_repid
