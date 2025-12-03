@@ -1,5 +1,3 @@
-# tests/test_connection_manager.py
-
 import uuid
 from typing import Any, Callable, List, Tuple
 
@@ -7,7 +5,6 @@ import pytest
 
 # Adjust these imports to match your project structure
 from disco.metastore import ZkConnectionManager
-from disco.metastore import create_zk_client  # just for type hints / monkeypatch target
 from kazoo.client import KazooState
 
 
@@ -20,6 +17,7 @@ class FakeKazooClient:
       - start / stop / close
     """
 
+    # noinspection PyUnusedLocal
     def __init__(self, *args, **kwargs) -> None:
         self.listeners: list[Callable[[Any], None]] = []
         self.started = False
@@ -53,6 +51,7 @@ def fake_kazoo(monkeypatch):
     """
     fake_client = FakeKazooClient()
 
+    # noinspection PyUnusedLocal
     def _fake_create_zk_client(settings):
         return fake_client
 
@@ -61,22 +60,26 @@ def fake_kazoo(monkeypatch):
         _fake_create_zk_client,
     )
 
-    registrations: List[Tuple[FakeKazooClient, str, Callable]] = []
+    data_registrations: List[Tuple[FakeKazooClient, str, Callable]] = []
+    children_registrations: List[Tuple[FakeKazooClient, str, Callable]] = []
 
     def _fake_data_watch(client, path, func):
-        registrations.append((client, path, func))
+        data_registrations.append((client, path, func))
         return None
 
-    monkeypatch.setattr(
-        "disco.metastore.helpers.DataWatch",
-        _fake_data_watch,
-    )
+    def _fake_children_watch(client, path, func):
+        children_registrations.append((client, path, func))
+        return None
 
-    return fake_client, registrations
+    monkeypatch.setattr("disco.metastore.helpers.DataWatch", _fake_data_watch)
+    monkeypatch.setattr("disco.metastore.helpers.ChildrenWatch", _fake_children_watch)
+
+    return fake_client, data_registrations, children_registrations
 
 
+# noinspection PyTypeChecker,PyUnresolvedReferences,PyArgumentList
 def test_start_and_stop_lifecycle(fake_kazoo):
-    fake_client, _ = fake_kazoo
+    fake_client, _, _ = fake_kazoo
 
     mgr = ZkConnectionManager(DummySettings())
     mgr.start()
@@ -91,13 +94,15 @@ def test_start_and_stop_lifecycle(fake_kazoo):
     assert fake_client.closed is True
 
 
+# noinspection PyTypeChecker,PyUnresolvedReferences,PyArgumentList
 def test_watch_data_registers_and_reinstalls_on_session_loss(fake_kazoo):
-    fake_client, registrations = fake_kazoo
+    fake_client, registrations, children_regs = fake_kazoo
 
     mgr = ZkConnectionManager(DummySettings())
     mgr.start()
 
     # register a single watch; return False on data=None to stop watching
+    # noinspection PyUnusedLocal
     def cb(data: bytes | None, path: str) -> bool:
         # simulate "delete this watch" when node is deleted
         return data is not None
@@ -135,3 +140,49 @@ def test_watch_data_registers_and_reinstalls_on_session_loss(fake_kazoo):
 
     # Still only 2 registrations, no extra watch
     assert len(registrations) == 2
+
+
+# noinspection PyTypeChecker,PyUnresolvedReferences,PyArgumentList
+def test_watch_children_registers_and_reinstalls_on_session_loss(fake_kazoo):
+    fake_client, data_regs, children_regs = fake_kazoo
+
+    mgr = ZkConnectionManager(DummySettings())
+    mgr.start()
+
+    # noinspection PyUnusedLocal
+    def cb(children: list[str] | None, path: str) -> bool:
+        # stop watching when children becomes None
+        return children is not None
+
+    watch_id = mgr.watch_children("/bar", cb)
+    assert isinstance(watch_id, uuid.UUID)
+
+    # ChildrenWatch should have been called once
+    assert len(children_regs) == 1
+    client1, path1, func1 = children_regs[0]
+    assert client1 is fake_client
+    assert path1 == "/bar"
+    assert callable(func1)
+
+    # LOST -> CONNECTED triggers re-install
+    mgr._on_state_change(KazooState.LOST)
+    mgr._on_state_change(KazooState.CONNECTED)
+
+    assert len(children_regs) == 2
+    client2, path2, func2 = children_regs[1]
+    assert client2 is fake_client
+    assert path2 == "/bar"
+
+    # Simulate a normal update
+    keep = func2(["a", "b"])
+    assert keep is True
+
+    # Simulate terminal event: children=None → stop watching
+    keep2 = func2(None)
+    assert keep2 is False
+
+    # Further reconnect should NOT re-install
+    mgr._on_state_change(KazooState.LOST)
+    mgr._on_state_change(KazooState.CONNECTED)
+
+    assert len(children_regs) == 2
