@@ -265,7 +265,7 @@ class Cluster:
             raise KeyError(f"Server `{address}` has no info.")
         return ServerInfo(**data)
 
-    def register_server(self, server: str, state: State = State.CREATED):
+    def register_server(self, server: str, state: State = State.CREATED) -> None:
         """
         Registers a server.
         """
@@ -280,14 +280,14 @@ class Cluster:
         # Ephemeral node marks this server as active
         self.meta.update_key(active_path, state, ephemeral=True)
 
-    def unregister_server(self, server: str):
+    def unregister_server(self, server: str) -> None:
         active_path = f"{ACTIVE_SERVERS}/{server}"
         if active_path in self.meta:
             self.meta.drop_key(active_path)
         else:
             raise RuntimeError(f"Server {server} not registered.")
 
-    def set_server_state(self, server: str, state: State):
+    def set_server_state(self, server: str, state: State) -> None:
         active_path = f"{ACTIVE_SERVERS}/{server}"
         if active_path not in self.meta:
             raise RuntimeError(f"Server {server} not registered.")
