@@ -10,10 +10,6 @@ from kazoo.client import KazooClient
 from tools.mp_logging import getLogger
 
 from .helpers import ZkConnectionManager
-from .structure import BASE_STRUCTURE
-
-
-ExpandType: TypeAlias = Dict[str, "ExpandType"] | list | None
 
 QUEUE_POLLING_S = 0.05   # polling for Kazoo queues
 
@@ -32,10 +28,11 @@ class Metastore:
 
     def __init__(
         self,
-        connection: "ZkConnectionManager",
+        connection: ZkConnectionManager,
         group: Optional[str] = None,
         packb: Callable[[Any], bytes] = pickle.dumps,
         unpackb: Callable[[bytes], Any] = pickle.loads,
+        base_structure: Optional[list[str]] = None
     ) -> None:
         self._connection = connection
         self._group = group
@@ -45,22 +42,29 @@ class Metastore:
 
         self._queue_polling_interval = QUEUE_POLLING_S
 
-        # Ensure base structure under chroot + optional /<group>
-        for path in BASE_STRUCTURE:
-            full = self._full_path(path)
-            self.client.ensure_path(full)
-
-    # ----------------------------------------------------------------------
-    # Internal helpers
-    # ----------------------------------------------------------------------
+        self.ensure_structure(base_structure or [])
 
     @property
     def group(self) -> Optional[str]:
         return self._group
 
+    # ----------------------------------------------------------------------
+    # Internal helpers
+    # ----------------------------------------------------------------------
+
+    def ensure_structure(self, base_structure: list[str]):
+        # Ensure base structure under chroot + optional /<group>
+        for path in base_structure:
+            full = self._full_path(path)
+            self.client.ensure_path(full)
+
     @property
     def client(self) -> KazooClient:
         return self._connection.client
+
+    @property
+    def stopped(self) -> bool:
+        return self._connection.stopped
 
     def _full_path(self, path: str) -> str:
         """
@@ -98,6 +102,28 @@ class Metastore:
 
         return self._connection.watch_data(full_path, _wrapped)
 
+    def watch_members_with_callback(
+        self,
+        path: str,
+        callback: Callable[[list[str], str], bool],
+    ) -> uuid.UUID:
+        """
+        Register a children watch on the logical `path`.
+
+        - Underlying ZooKeeper watch tracks children of `_full_path(path)`.
+        - `callback(children, full_path)` is called when the children list changes.
+        - If callback returns False, the watch is removed.
+        """
+        full_path = self._full_path(path)
+
+        def _wrapped(children: Optional[list[str]], p: str) -> bool:
+            if children is None:
+                # Node deleted or no further interest → stop watching by default.
+                return False
+            return callback(children, p)
+
+        return self._connection.watch_children(full_path, _wrapped)
+
     # ----------------------------------------------------------------------
     # Key-value operations
     # ----------------------------------------------------------------------
@@ -116,14 +142,14 @@ class Metastore:
     def __getitem__(self, item: str) -> Any:
         return self.get_key(item)
 
-    def update_key(self, path: str, value: Any) -> None:
+    def update_key(self, path: str, value: Any, ephemeral: bool = False) -> None:
         full_path = self._full_path(path)
         data = self._packb(value)
 
         if self.client.exists(full_path):
             self.client.set(full_path, data)
         else:
-            self.client.create(full_path, data, makepath=True)
+            self.client.create(full_path, data, makepath=True, ephemeral=ephemeral)
 
     def drop_key(self, path: str) -> bool:
         full_path = self._full_path(path)
@@ -145,7 +171,7 @@ class Metastore:
     def get_keys(
             self,
             path: str,
-            expand: dict[str, "ExpandType"] | None = None,
+            expand: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """
         Returns all keys and values found at the logical path `path`.
@@ -190,7 +216,7 @@ class Metastore:
         self,
         path: str,
         members: dict[str, Any],
-        expand: dict[str, "ExpandType"] | None = None,
+        expand: dict[str, Any] | None = None,
         drop: bool = False,
     ) -> None:
         """

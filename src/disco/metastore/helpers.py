@@ -3,7 +3,7 @@ import uuid
 from typing import Any, Callable, Dict, Optional
 
 from kazoo.client import KazooClient, KazooState, KazooRetry
-from kazoo.recipe.watchers import DataWatch
+from kazoo.recipe.watchers import DataWatch, ChildrenWatch
 
 from tools.mp_logging import getLogger
 from disco.config import ZookeeperSettings
@@ -83,6 +83,10 @@ class ZkConnectionManager:
         # callback: Callable[[Optional[bytes], str], bool]
         self._watched: Dict[uuid.UUID, tuple[str, Callable[[Optional[bytes], str], bool]]] = {}
 
+        # watch_id -> (path, callback)
+        # callback: Callable[[Optional[list[str]], str], bool]
+        self._children_watched: Dict[uuid.UUID, tuple[str, Callable[[Optional[list[str]], str], bool]]] = {}
+
         self._lock = threading.RLock()
         self._session_lost = False
         self._stopped = False
@@ -120,6 +124,10 @@ class ZkConnectionManager:
         if client is not None:
             client.stop()
             client.close()
+
+    @property
+    def stopped(self) -> bool:
+        return self._stopped
 
     # --- connection state handling ----------------------------------------
 
@@ -177,13 +185,55 @@ class ZkConnectionManager:
 
         DataWatch(self.client, path, func=_wrapped)
 
+    def watch_children(
+        self,
+        path: str,
+        callback: Callable[[Optional[list[str]], str], bool],
+    ) -> uuid.UUID:
+        """
+        Register a children watch on `path`.
+
+        callback receives (children_or_None, path) and should return:
+        - True  to keep watching
+        - False to stop watching (and remove from cache).
+        """
+        with self._lock:
+            watch_id = uuid.uuid4()
+            self._children_watched[watch_id] = (path, callback)
+            self._install_children_watch(watch_id, path, callback)
+            return watch_id
+
+    def _install_children_watch(
+        self,
+        watch_id: uuid.UUID,
+        path: str,
+        callback: Callable[[Optional[list[str]], str], bool],
+    ) -> None:
+        """
+        Internal helper to attach a Kazoo ChildrenWatch for a given cached callback.
+        """
+
+        def _wrapped(children):
+            keep = callback(children, path)
+            if not keep:
+                with self._lock:
+                    self._children_watched.pop(watch_id, None)
+            return keep
+
+        ChildrenWatch(self.client, path, func=_wrapped)
+
     def _reinstall_watches(self) -> None:
         """
         Reinstall all cached data watches after a LOST -> CONNECTED transition.
         """
-        with self._lock:
-            items = list(self._watched.items())
 
-        for watch_id, (path, callback) in items:
+        data_items = list(self._watched.items())
+        children_items = list(self._children_watched.items())
+
+        for watch_id, (path, callback) in data_items:
             logger.debug("Reinstalling data watch %s on path %s", watch_id, path)
             self._install_data_watch(watch_id, path, callback)
+
+        for watch_id, (path, callback) in children_items:
+            logger.debug("Reinstalling children watch %s on path %s", watch_id, path)
+            self._install_children_watch(watch_id, path, callback)
