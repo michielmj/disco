@@ -51,4 +51,4 @@ jobs:
         run: pytest -q
 
       - name: Type check
-        run: mypy src/data_logger
+        run: mypy src/disco
