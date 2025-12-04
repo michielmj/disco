@@ -208,8 +208,8 @@ The **Cluster** component provides a high-level, in-process view of the running 
 
 Cluster is responsible for:
 
-- Tracking which servers are currently active in the system.
-- Tracking which nodes (and replications) are hosted on which server.
+- Tracking which workers are currently registered in the system.
+- Tracking which nodes (and replications) are hosted on which worker.
 - Providing an address book that maps nodes/replications to a network address usable by transports.
 - Exposing the address of the local application process.
 
@@ -227,9 +227,12 @@ Where:
 
 - `repid` is the replication id of the experiment.
 - `node` is the node name.
-- `address` is a logical endpoint string for the server that currently hosts that node/replication.
-  - Multiple processes belonging to the same logical server may share the same address.
+- `address` is a logical endpoint string for the worker that currently hosts that node/replication.
+  - Multiple processes belonging to the same logical worker may share the same address.
   - Each application process that can receive IPC messages should have a unique address.
+
+Registered workers are tracked under the logical path `/simulation/registered_workers`, and per-worker metadata
+lives under `/simulation/workers/<worker_id>`.
 
 The routing and transport layer uses this address book to determine:
 

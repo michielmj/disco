@@ -10,7 +10,7 @@ from .transports.base import Transport
 
 
 @dataclass(slots=True)
-class ServerRouter:
+class WorkerRouter:
     """Choose transports for outbound envelopes based on cluster metadata."""
 
     cluster: Cluster
