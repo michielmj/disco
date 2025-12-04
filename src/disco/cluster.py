@@ -1,6 +1,6 @@
 from functools import partial
 from threading import Condition, RLock
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Mapping, cast
 
 from enum import IntEnum
@@ -23,7 +23,7 @@ class State(IntEnum):
     BROKEN = 8
 
 
-@dataclass
+@dataclass(slots=True)
 class WorkerInfo:
     expid: str | None = None
     repid: str | None = None
@@ -276,7 +276,7 @@ class Cluster:
             raise RuntimeError(f"Worker {worker} already registered.")
 
         # Initialize default status under WORKERS/<worker>
-        self.meta.update_keys(f"{WORKERS}/{worker}", WorkerInfo().__dict__)
+        self.meta.update_keys(f"{WORKERS}/{worker}", asdict(WorkerInfo()))
         # Ephemeral node marks this worker as registered
         self.meta.update_key(registered_path, state, ephemeral=True)
 
