@@ -14,21 +14,8 @@ Codex must:
 - Use `dataclasses` with `slots=True` for lightweight containers.
 - Avoid unnecessary abstraction; keep things direct and composable.
 
-## Serialization & Transport
-Follow the guidance in `ENGINEERING_SPEC.md`:
-- Serialization occurs only in `NodeController`.
-- `_deliver_local_event` and `_deliver_local_promise` must exist but be empty.
-- No EventQueue initialization in this iteration.
-- Transports treat data as opaque bytes.
-- `"self"` is a valid `target_node` alias.
-
 ## Testing
 - All new code must be accompanied by `pytest` test cases.
-- Tests must cover:
-  - Local vs remote behavior for `NodeController`.
-  - `"self"` alias behavior.
-  - Serialization is called exactly once per send.
-  - InProcessTransport correctly calls the receiver.
 - Tests should live in the `tests/` directory and follow the `test_*.py` naming pattern.
 
 ## Static Checking
