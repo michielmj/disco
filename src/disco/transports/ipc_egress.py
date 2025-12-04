@@ -47,7 +47,12 @@ class IPCTransport(Transport):
             )
         else:
             shm = SharedMemory(create=True, size=len(envelope.data))
-            shm.buf[: len(envelope.data)] = envelope.data
+            buf = shm.buf
+            if buf is None:
+                shm.close()
+                shm.unlink()
+                raise RuntimeError("Shared memory buffer is unavailable")
+            buf[: len(envelope.data)] = envelope.data
             msg = IPCEventMsg(
                 target_node=envelope.target_node,
                 target_simproc=envelope.target_simproc,

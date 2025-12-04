@@ -66,7 +66,10 @@ class IPCReceiver:
             return msg.data
         shm = SharedMemory(name=msg.shm_name)
         try:
-            data = bytes(shm.buf[: msg.size])
+            buf = shm.buf
+            if buf is None:
+                raise RuntimeError("Shared memory buffer is unavailable")
+            data = bytes(buf[: msg.size])
         finally:
             shm.close()
             shm.unlink()

@@ -7,7 +7,7 @@ import pickle
 from typing import Any, Callable
 
 from .envelopes import EventEnvelope, PromiseEnvelope
-from .router import ServerRouter
+from .router import WorkerRouter
 
 
 def _noop_event(_: EventEnvelope) -> None:
@@ -23,7 +23,7 @@ class NodeController:
     """Manage sending and receiving events and promises for a node."""
 
     node_name: str
-    router: ServerRouter
+    router: WorkerRouter
     serializer: Callable[[Any], bytes] = field(default=pickle.dumps)
     _deliver_local_event: Callable[[EventEnvelope], None] = field(
         default=_noop_event, repr=False
