@@ -242,13 +242,11 @@ The routing and transport layer uses this address book to determine:
 
 ### Local Address
 
-Each process/application that participates in the cluster must know its own address:
+Each worker that participates in the cluster must know its own address:
 
 ```python
 local_address: str  # same format as in address_book values
 ```
-
-Transports use `local_address` to decide whether a node is local to this process or must be reached via IPC/gRPC.
 
 ### Consistency & Failure Semantics
 
