@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Dict, Sequence, Mapping, Any, List, Optional
+from typing import Dict, Sequence, Mapping, Any, List, Optional, cast
 
 import numpy as np
 import graphblas as gb
@@ -7,6 +7,7 @@ from sqlalchemy import select, insert, delete, func, literal, and_
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.schema import Table
 from sqlalchemy.sql.elements import ColumnElement
+from sqlalchemy.engine import RowMapping
 
 from .core import Graph
 from .schema import (
@@ -69,7 +70,7 @@ def _store_edges_for_scenario(session: Session, graph: Graph) -> None:
     )
 
     # Insert new edges per layer
-    for layer_id, mat in graph.layers_dict().items():
+    for layer_id, mat in graph.layers.items():
         rows, cols, vals = mat.to_coo()
         if len(rows) == 0:
             continue
@@ -202,7 +203,7 @@ def store_graph_edges(
 def _load_num_vertices(session: Session, scenario_id: int) -> int:
     max_idx = session.execute(
         select(func.max(vertices.c.vertex_index)).where(
-            vertices.c.scenario_id == scenario_id
+            vertices.c.scenario_id == literal(scenario_id)
         )
     ).scalar_one()
     return int(max_idx) + 1 if max_idx is not None else 0
@@ -226,7 +227,7 @@ def _load_edge_layers(
             edges.c.source_idx,
             edges.c.target_idx,
             edges.c.weight,
-        ).where(edges.c.scenario_id == scenario_id)
+        ).where(edges.c.scenario_id == literal(scenario_id))
     )
 
     layer_sources: Dict[int, list[int]] = {}
@@ -284,7 +285,7 @@ def _load_labels_for_scenario(
     # Fetch all labels for this scenario
     label_rows = session.execute(
         select(labels.c.id, labels.c.type, labels.c.value).where(
-            labels.c.scenario_id == scenario_id
+            labels.c.scenario_id == literal(scenario_id)
         )
     ).all()
 
@@ -325,7 +326,7 @@ def _load_labels_for_scenario(
     # Fetch vertex-label assignments
     vl_rows = session.execute(
         select(vertex_labels.c.vertex_index, vertex_labels.c.label_id).where(
-            vertex_labels.c.scenario_id == scenario_id
+            vertex_labels.c.scenario_id == literal(scenario_id)
         )
     ).all()
 
@@ -437,8 +438,10 @@ def fetch_vertex_data(
         stmt = (
             base.join(
                 vm,
-                and_(vm.c.scenario_id == data_table.c.scenario_id,
-                     vm.c.vertex_index == data_table.c.vertex_index),
+                and_(
+                    vm.c.scenario_id == data_table.c.scenario_id,
+                    vm.c.vertex_index == data_table.c.vertex_index,
+                ),
             )
             .where(
                 vm.c.mask_id == literal(mask.mask_id),
@@ -447,4 +450,7 @@ def fetch_vertex_data(
         )
 
     result = session.execute(stmt)
-    return list(result.mappings())
+    raw_rows: list[RowMapping] = list(result.mappings())
+    # Let mypy know these are fine as Mapping[str, Any]
+    rows: List[Mapping[str, Any]] = cast(List[Mapping[str, Any]], raw_rows)
+    return rows

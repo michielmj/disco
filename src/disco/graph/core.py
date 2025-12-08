@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from typing import Mapping, Dict, Optional, Sequence, Tuple, TYPE_CHECKING, Any
+from typing import Mapping, Dict, Optional, Sequence, Tuple, TYPE_CHECKING, Any, Self
+from types import MappingProxyType
 
 import numpy as np
 import graphblas as gb
 from graphblas import Matrix, Vector
 
-from .graph_mask import GraphMask  # if you already have this; otherwise remove
+from .graph_mask import GraphMask
 
 if TYPE_CHECKING:
-    # Only for the thin delegating methods; remove if you don't want DB helpers on Graph.
     from sqlalchemy.orm import Session
     from sqlalchemy.sql.schema import Table
     from sqlalchemy.sql.elements import ColumnElement
@@ -60,9 +60,14 @@ class Graph:
         label_meta: Optional[Dict[int, Tuple[str, str]]] = None,
         label_type_vectors: Optional[Dict[str, Vector]] = None,
     ) -> None:
-        self._layers: Dict[int, Matrix] = dict(layers)
-        self.num_vertices = int(num_vertices)
-        self.scenario_id = int(scenario_id)
+        # Avoid unnecessary copies; only wrap if needed
+        if isinstance(layers, dict):
+            self._layers: Dict[int, Matrix] = layers
+        else:
+            self._layers = dict(layers)
+
+        self.num_vertices = num_vertices
+        self.scenario_id = scenario_id
 
         # mask (GraphMask, internal)
         self._mask: Optional[GraphMask] = None
@@ -80,33 +85,23 @@ class Graph:
 
     @classmethod
     def from_edges(
-        cls,
-        edge_layers: Mapping[int, tuple[np.ndarray, np.ndarray, np.ndarray]],
-        *,
-        num_vertices: Optional[int] = None,
-        num_nodes: Optional[int] = None,   # backwards compat with older tests
-        scenario_id: int = 0,
+            cls,
+            edge_layers: Mapping[int, tuple[np.ndarray, np.ndarray, np.ndarray]],
+            *,
+            num_vertices: int,
+            scenario_id: int = 0,
     ) -> Graph:
         """
         Build a Graph from per-layer edge arrays.
 
-        edge_layers: mapping layer_id -> (source_vertex_indices, target_vertex_indices, weights)
-        num_vertices / num_nodes: total number of vertices (must be specified via
-                                  at least one of these; both must match if both are given).
+        edge_layers:
+            mapping layer_id -> (source_vertex_indices, target_vertex_indices, weights)
+        num_vertices:
+            total number of vertices (0..num_vertices-1)
         """
-        if num_vertices is None and num_nodes is None:
-            raise ValueError("Either num_vertices or num_nodes must be provided")
-
-        if num_vertices is None:
-            num_vertices = int(num_nodes)
-        elif num_nodes is not None and int(num_nodes) != int(num_vertices):
-            raise ValueError(
-                f"num_vertices ({num_vertices}) != num_nodes ({num_nodes}); please pass only one"
-            )
-
         num_vertices = int(num_vertices)
 
-        layers: Dict[int, Matrix] = {}
+        layers_dict: Dict[int, Matrix] = {}
         for layer_id, (src, dst, w) in edge_layers.items():
             src_arr = np.asarray(src, dtype=np.int64)
             dst_arr = np.asarray(dst, dtype=np.int64)
@@ -119,14 +114,9 @@ class Graph:
                 nrows=num_vertices,
                 ncols=num_vertices,
             )
-            layers[int(layer_id)] = mat
+            layers_dict[int(layer_id)] = mat
 
-        return cls(layers=layers, num_vertices=num_vertices, scenario_id=scenario_id)
-
-    # Backwards compat for existing `num_nodes` usage in tests
-    @property
-    def num_nodes(self) -> int:
-        return self.num_vertices
+        return cls(layers=layers_dict, num_vertices=num_vertices, scenario_id=scenario_id)
 
     # ------------------------------------------------------------------ #
     # Mask handling (public API: Vector; internal: GraphMask)
@@ -158,8 +148,14 @@ class Graph:
             return None
         return self._mask.vector
 
-    # internal accessor for DB / extract helpers
-    def _graph_mask(self) -> Optional[GraphMask]:
+    @property
+    def graph_mask(self) -> Optional[GraphMask]:
+        """
+        Return the GraphMask wrapper for this graph, if any.
+
+        This is mainly for internal use by DB/extract helpers, but exposed
+        as a read-only property instead of an underscored helper.
+        """
         return self._mask
 
     # ------------------------------------------------------------------ #
@@ -173,22 +169,6 @@ class Graph:
     ) -> None:
         """
         Attach label structures to the graph.
-
-        label_matrix:
-            - Matrix[BOOL] with shape (num_vertices, num_labels)
-            - rows  = vertices
-            - cols  = labels
-            - True  = vertex has that label
-
-        label_meta (optional):
-            - mapping label_index -> (label_type, label_value)
-
-        label_type_vectors (optional):
-            - mapping label_type -> Vector[BOOL] of size num_labels
-              where True means "label at this index has this type".
-
-        All GraphBLAS collections are stored directly; no Python loops over
-        vertices/labels are used in the core representation.
         """
         if label_matrix.dtype is not gb.dtypes.BOOL:
             raise TypeError(f"label_matrix must have BOOL dtype, got {label_matrix.dtype!r}")
@@ -200,11 +180,10 @@ class Graph:
         self._label_matrix = label_matrix
         self.num_labels = int(label_matrix.ncols)
 
-        # metadata: purely Python, for introspection / mapping ids to names
-        self._label_meta = dict(label_meta or {})
-
-        # type vectors: GraphBLAS vectors over label ids
+        # Keep references; no copies
+        self._label_meta = label_meta if label_meta is not None else {}
         self._label_type_vectors = {}
+
         if label_type_vectors is not None:
             for t, vec in label_type_vectors.items():
                 if vec.dtype is not gb.dtypes.BOOL:
@@ -217,29 +196,24 @@ class Graph:
 
     @property
     def label_matrix(self) -> Optional[Matrix]:
-        """
-        Sparse boolean matrix of label assignments (vertices x labels),
-        or None if no labels are attached.
-        """
+        """Sparse boolean matrix of label assignments (vertices x labels)."""
         return self._label_matrix
 
     @property
-    def label_meta(self) -> Dict[int, Tuple[str, str]]:
+    def label_meta(self) -> Mapping[int, Tuple[str, str]]:
         """
-        Mapping label_index -> (label_type, label_value).
+        Read-only view of label_index -> (label_type, label_value).
+        Mutating the underlying dict is still possible through other references,
+        but this property itself cannot be assigned to.
         """
-        return dict(self._label_meta)
+        return MappingProxyType(self._label_meta)
 
     @property
-    def label_type_vectors(self) -> Dict[str, Vector]:
+    def label_type_vectors(self) -> Mapping[str, Vector]:
         """
-        Mapping label_type -> Vector[BOOL] over label indices.
-
-        Each vector has size num_labels and True where the label at that index
-        belongs to this type. Label types are non-overlapping subsets of labels
-        by construction.
+        Read-only view of label_type -> Vector[BOOL] over label indices.
         """
-        return dict(self._label_type_vectors)
+        return MappingProxyType(self._label_type_vectors)
 
     def get_vertex_mask_for_label_id(self, label_id: int) -> Vector:
         """
@@ -250,17 +224,12 @@ class Graph:
             raise RuntimeError("Graph has no labels attached (label_matrix is None)")
         if not (0 <= label_id < self.num_labels):
             raise IndexError(f"label_id {label_id} out of range [0, {self.num_labels})")
-        # Column slice -> Vector[BOOL] over vertices
         return self._label_matrix[:, int(label_id)]
 
     def get_vertex_mask_for_label_type(self, label_type: str) -> Vector:
         """
         Return a Vector[BOOL] of size num_vertices indicating which vertices
         have ANY label of the given type.
-
-        Implemented as a boolean matrix-vector product:
-
-            vertex_mask = label_matrix.mxv(type_vec, lor_land)
         """
         if self._label_matrix is None:
             raise RuntimeError("Graph has no labels attached (label_matrix is None)")
@@ -268,42 +237,39 @@ class Graph:
             raise KeyError(f"Unknown label_type {label_type!r}")
 
         type_vec = self._label_type_vectors[label_type]
-        # bool semiring: OR over labels, AND for combination
         return self._label_matrix.mxv(type_vec, gb.semiring.lor_land)
 
     # ------------------------------------------------------------------ #
     # Structural accessors
     # ------------------------------------------------------------------ #
-    def layers_dict(self) -> Dict[int, Matrix]:
-        """Return a shallow copy of the internal layer mapping."""
-        return dict(self._layers)
+    @property
+    def layers(self) -> Mapping[int, Matrix]:
+        """
+        Read-only view of the internal layer mapping.
+
+        NOTE:
+        - The mapping itself cannot be mutated through this property
+          (MappingProxyType).
+        - The *Matrix* objects inside are still mutable by design.
+        """
+        return MappingProxyType(self._layers)
 
     def get_matrix(self, layer: int) -> Matrix:
         """Return the full adjacency matrix for a layer (no masking applied)."""
         return self._layers[layer]
 
     def get_out_edges(self, layer: int, vertex_index: int) -> Vector:
-        """
-        Return outgoing edges of vertex_index as a Vector:
-
-        - indices: target vertices
-        - values: edge weights
-        """
+        """Return outgoing edges of vertex_index as a Vector."""
         mat = self._layers[layer]
         return mat[vertex_index, :]
 
     def get_in_edges(self, layer: int, vertex_index: int) -> Vector:
-        """
-        Return incoming edges of vertex_index as a Vector:
-
-        - indices: source vertices
-        - values: edge weights
-        """
+        """Return incoming edges of vertex_index as a Vector."""
         mat = self._layers[layer]
         return mat[:, vertex_index]
 
     # ------------------------------------------------------------------ #
-    # (Optional) thin delegating methods for DB-backed data extraction
+    # Thin delegating methods for DB-backed data extraction
     # ------------------------------------------------------------------ #
     def get_vertex_data(
         self,
@@ -313,12 +279,7 @@ class Graph:
         *,
         mask: Optional[Vector] = None,
     ) -> pd.DataFrame:
-        """
-        Delegate to disco.graph.extract.get_vertex_data.
-
-        mask (if provided) overrides the Graph's own mask for this call.
-        """
-        from .extract import get_vertex_data as _get_vertex_data  # local import avoids cycles
+        from .extract import get_vertex_data as _get_vertex_data
 
         effective_mask: Optional[GraphMask] = self._mask
         if mask is not None:
