@@ -1,68 +1,302 @@
-# ENGINEERING_SPEC: Routing & Transport Layer for Distributed Simulation
+# ENGINEERING_SPEC: A Distributed Simulation Core Enginer
 ## 1. Overview
 
-We introduce a routing & transport layer for a distributed simulation engine in the `disco` package.
+This document describes the architecture and design of **disco**: a **Distributed Simulation Core** for running large, event-driven simulations across multiple processes and machines.
 
-This layer is responsible for moving events and promises between nodes and simulation processes (“simprocs”) across:
+At a high level, disco provides:
 
-- The same node (local delivery, handled entirely by `NodeController`)
-- The same machine but different processes (IPC)
-- Different machines / applications (gRPC)
+- A **runtime hierarchy** of:
+  - **Application** → one OS process acting as the coordinator and host for multiple Workers.
+  - **Workers** → long-lived simulation processes running on one or more machines.
+  - **NodeControllers** → per-node managers that own simulation logic and event queues.
+  - **Simprocs** → small simulation processes / state machines inside a node.
+- A clear separation between:
+  - **Control plane**: configuration, metadata, desired state, orchestration.
+  - **Data plane**: events and promises flowing between nodes, Workers, and machines.
+- A **metadata and coordination layer** built on ZooKeeper (wrapped by `Metastore` and `Cluster`), used for:
+  - Worker registration and state
+  - Experiment / replication / partition assignments
+  - Routing metadata (which node lives where)
+- A **routing and transport layer** that delivers events and promises:
+  - In-process (same Worker)
+  - Via IPC queues + shared memory (same machine, different process)
+  - Via gRPC (different machines)
+- A **graph/scenario subsystem** that stores layered DAGs in a relational DB, with in-memory acceleration using `python-graphblas` and persisted masks for efficient data extraction.
 
-This spec covers:
+The **Graph** provides the **basic structure of a simulation scenario**: it describes which entities exist, how they are connected, and how interactions are layered. This graph structure **governs how nodes are created and how they interact**, and simprocs are closely linked to the graph layers. The exact mapping from graph to nodes and simprocs is specified in later chapters.
 
-- **Iteration 1**: Core envelopes, `NodeController`, `ServerRouter`, in-process transport
-- **Iteration 2**: IPC transport using `multiprocessing.Queue` + `SharedMemory`
-
-Serialization is done in `NodeController`. No compression logic is implemented in our code; gRPC compression will be configured externally in a later iteration.
-
-All Python source files go under:
+All Python source files live under:
 
 - `src/disco/...`
 
+The engineering spec is organized around these responsibilities:
+
+- **Chapter 1–2** – High-level overview and core terminology.
+- **Chapter 3–4** – Metastore (ZooKeeper) and Cluster (metadata, address book, control plane).
+- **Chapter 5** – Worker architecture and lifecycle.
+- **Chapter 6** – Routing and transport (InProcess, IPC, gRPC).
+- **Chapter 7+** – Layered graph and scenarios, plus higher-level modules as they are introduced.
+
+This spec focuses on architectural contracts and invariants rather than specific simulation models. Different simulation engines (domains, models) should be able to sit on top of the same core without changing the infrastructure components.
+
+---
+
 ## 2. Concepts & Terminology
 
-- **Node**: logical entity in the simulation. Each node has multiple simprocs.
-- **Simproc**: a simulation process (layer in a layered DAG). Same set of simprocs exists on all nodes. Each node will eventually have an EventQueue per simproc (not implemented yet).
-- **NodeController**: manages a single node and all its simprocs, including sending and receiving events and promises for that node.
-- **Server**: runs multiple `NodeController`s on a single OS thread (details out-of-scope here).
-- **Application**: runs multiple Servers in different processes on the same machine.
-- **Routing / Transport**: responsible for delivering events/promises between nodes, processes, and machines.
+This section defines the core concepts used throughout the spec and codebase. Later chapters reference these terms without redefining them.
 
-### Addressing
+### 2.1 Runtime Hierarchy
 
-- Consumers are addressed as: `<node>/<simproc>`.
-- `target_node` can also be the string `"self"`, meaning “this node”. `NodeController` must interpret `"self"` as its own `node_name`.
+- **Application**  
+  A single OS process that bootstraps the system (e.g. a CLI or service entrypoint). An application:
+  - Creates and manages one or more **Workers** (often via `multiprocessing`).
+  - Instantiates a single **Metastore** and **Cluster** client in its own process.
+  - Optionally runs a small simulation locally (e.g. for small experiments) without gRPC.
 
-### Events and Promises
+- **Worker**  
+  A long-lived simulation process that:
 
-- **Events**: carry the actual data (up to a few MB, already serialized into `bytes`).
-- **Promises**: small control messages used by the EventQueue layer to determine ordering and completeness.
+  - Hosts a set of **NodeControllers** for one or more nodes.
+  - Runs a **single runner loop** on one thread for determinism.
+  - Maintains a **WorkerState** (`CREATED`, `AVAILABLE`, `INITIALIZING`, `READY`, `ACTIVE`, `PAUSED`, `TERMINATED`, `BROKEN`).
+  - Installs routing and transports for its nodes.
+  - Receives desired-state changes via the Cluster and applies them in the runner thread.
 
-Public send APIs on `NodeController`:
+- **NodeController**  
+  A per-node manager that:
 
-```python
-def send_event(
-    self,
-    target: str,                # "<node>/<simproc>" or "self/<simproc>"
-    epoch: float,
-    data: Any,
-    headers: dict[str, str] | None = None,
-) -> None: ...
+  - Owns the node’s **EventQueue** and all its **simprocs**.
+  - Provides methods to send/receive events and promises.
+  - Serializes event payloads and delegates remote routing to the **WorkerRouter**.
+  - Drains its own EventQueue when the Worker gives it attention in the runner loop.
 
-def send_promise(
-    self,
-    target: str,                # "<node>/<simproc>" or "self/<simproc>"
-    seqnr: int,
-    epoch: float,
-    num_events: int,
-) -> None: ...
-```
+- **Simproc**  
+  A *simulation process*—a unit of simulation logic (e.g. a state machine, step function, or handler) inside a node. Conceptually:
 
-Notes:
+  - Each node has a structured set of simprocs that is **closely linked to the layers of the Graph** (e.g. one simproc per layer or per role within a layer).
+  - Simprocs consume events and promises from the node’s EventQueue.
+  - Simprocs are not directly visible to the routing/transport layer; they are addressed through the NodeController.
 
-- `NodeController` holds the full state for the node; it does not need sender info for routing.
-- If sender metadata is needed for model logic, it can later be added as headers or optional fields on envelopes.
+The precise mapping between graph layers, nodes, and simprocs is described in a later chapter, but the basic idea is: **the Graph defines the layered structure, simprocs implement the behavior per layer.**
+
+### 2.2 Addressing and Targets
+
+- **Node name**  
+  A unique logical name for a node within an experiment/replication (e.g. `"factory_1"`, `"warehouse_A"`).
+
+- **Simproc name**  
+  A logical name identifying a simproc within a node (e.g. `"arrival"`, `"processing"`).
+
+- **Target string**  
+  Consumers are referenced as:
+
+  ```text
+  <node>/<simproc>
+  ```
+
+  or, within a NodeController:
+
+  ```text
+  self/<simproc>
+  ```
+
+  where `"self"` means “this NodeController’s node”. NodeControllers resolve `"self"` to their own `node_name` before routing.
+
+### 2.3 Events, Promises, and EventQueues
+
+- **Event**  
+  A message carrying actual simulation data. Characteristics:
+
+  - Has a simulation time `epoch` (float).
+  - Carries an opaque, already serialized payload (`bytes`).
+  - Can have optional `headers: dict[str, str]`.
+
+- **Promise**  
+  A small, control-oriented message used by the EventQueue layer to maintain ordering and completeness. Characteristics:
+
+  - Identified by `seqnr` (sequence number).
+  - Contains `epoch` and `num_events` (how many events belong to this promise).
+  - Never carries a payload (`bytes`) and is always small.
+
+- **EventQueue**  
+  A per-node (or per-node/per-simproc) queue inside the NodeController that:
+
+  - Accepts both events and promises.
+  - Is drained by the NodeController when the Worker runner gives it attention.
+  - May enforce ordering and completion guarantees based on promises (details in the NodeController chapter).
+
+- **NodeController send API**  
+  The NodeController exposes a high-level API for model code to send messages:
+
+  ```python
+  def send_event(
+      self,
+      target: str,                # "<node>/<simproc>" or "self/<simproc>"
+      epoch: float,
+      data: Any,
+      headers: dict[str, str] | None = None,
+  ) -> None: ...
+
+  def send_promise(
+      self,
+      target: str,                # "<node>/<simproc>" or "self/<simproc>"
+      seqnr: int,
+      epoch: float,
+      num_events: int,
+  ) -> None: ...
+  ```
+
+  The NodeController is responsible for:
+
+  - Resolving `"self"` into a concrete node name.
+  - Serializing `data` into `bytes`.
+  - Deciding whether the target is local or remote.
+  - Constructing appropriate **envelopes** and delegating to the WorkerRouter.
+
+### 2.4 Envelopes, Routing, and Transports
+
+- **Envelope**  
+  An immutable object used to carry events and promises across process or machine boundaries:
+
+  - `EventEnvelope` – node, simproc, epoch, serialized bytes, headers.
+  - `PromiseEnvelope` – node, simproc, seqnr, epoch, num_events.
+
+  Envelopes are used by **transports**; model code and simprocs typically see only higher-level events and promises.
+
+- **WorkerRouter**  
+  A per-Worker routing component that:
+
+  - Knows the current replication id (`repid`).
+  - Consults the **Cluster’s address book** to understand where nodes live.
+  - Holds an ordered list of **transports** and chooses the first one whose `handles_node(repid, node)` returns `True`.
+  - Delegates `send_event` and `send_promise` to the chosen transport.
+
+- **Transport**  
+  A concrete mechanism for delivering envelopes between processes/machines. All transports implement a common interface:
+
+  - `handles_node(repid, node) -> bool`
+  - `send_event(repid, envelope)`
+  - `send_promise(repid, envelope)`
+
+  Current transport types:
+
+  - **InProcessTransport** – direct function calls into local NodeControllers.
+  - **IPCTransport** – uses `multiprocessing.Queue` and shared memory between processes on the same machine.
+  - **GrpcTransport** – uses gRPC (with protobuf messages) to communicate with Workers on other machines, with prioritized, retried promise delivery.
+
+### 2.5 Metastore and Cluster (Control Plane)
+
+- **Metastore**  
+  A high-level abstraction over ZooKeeper providing:
+
+  - Hierarchical key–value storage (`update_key`, `get_key`, `update_keys`, `get_keys`).
+  - Logical path namespacing (groups).
+  - Watch callbacks for changes.
+  - Optional queue primitives.
+
+  Metastore is **process-local**: each application process owns its own Metastore instance and ZooKeeper connection manager.
+
+- **Cluster**  
+  A higher-level view built on top of the Metastore. It:
+
+  - Tracks **registered workers** and their ephemeral state.
+  - Stores per-worker metadata (“worker info”), such as:
+    - Application id (`uuid4`) for grouping Workers in the same application.
+    - Worker process address (for IPC/gRPC).
+    - NUMA node for affinity-aware scheduling.
+    - Node assignments, experiment/replication/partition ids.
+  - Maintains an **address book** mapping `(repid, node)` → worker address.
+  - Exposes a **desired-state** mechanism:
+    - Desired state is stored as a **single JSON blob per worker**, so Workers never see partial updates.
+    - The Worker subscribes via `on_desired_state_change(worker_address, handler)`.
+    - Handlers run in a different thread and signal the Worker runner via conditions.
+
+  Cluster itself is agnostic of local Worker internals; it only manipulates metadata and desired state.
+
+### 2.6 WorkerState and Ingress
+
+- **WorkerState**  
+  An `IntEnum` describing the lifecycle of a Worker:
+
+  ```python
+  class WorkerState(IntEnum):
+      CREATED = 0
+      AVAILABLE = 1
+      INITIALIZING = 2
+      READY = 3
+      ACTIVE = 4
+      PAUSED = 5
+      TERMINATED = 6
+      BROKEN = 9
+  ```
+
+- **Ingress rules**  
+  Transports and gRPC/IPC receivers obey WorkerState:
+
+  - Ingress accepted for:
+    - `READY`
+    - `ACTIVE`
+    - `PAUSED` (queues may fill; backpressure applies)
+  - Ingress rejected or failed for:
+    - `CREATED`
+    - `AVAILABLE`
+    - `INITIALIZING`
+    - `TERMINATED`
+    - `BROKEN`
+
+  Delivery failures (especially for promises) are logged; unrecoverable failures cause the Worker to transition to `BROKEN`.
+
+### 2.7 Graphs, Scenarios, and Masks (Data + Structure Layer)
+
+- **Scenario**  
+  A named graph instance stored in the database. Scenarios model the **structural aspects of a simulation** (e.g. supply chain networks, process graphs, resource graphs) and are stored in the dedicated `graph` schema.
+
+- **Graph**  
+  The main in-memory structure (`disco.graph.core.Graph`) representing:
+
+  - Vertices and layered edges (one GraphBLAS matrix per layer).
+  - Labels and label types (as matrices/vectors).
+  - An optional vertex mask (`GraphMask`) used to select subgraphs.
+
+  The **Graph provides the basic structure of a simulation scenario**:
+
+  - It defines which entities exist and how they are connected.
+  - It describes **layers of interaction** (e.g. physical flows, information flows, capacity layers).
+  - It **governs how nodes will be created and how they interact** at runtime: nodes and their relationships are derived from the graph structure when experiments are loaded.
+  - **Simprocs are closely linked to the graph layers**: a typical pattern is that each layer corresponds to a simproc (or a small group of simprocs) that implements the behavior for that layer.
+
+  The exact mapping (vertex ↔ node, layer ↔ simproc, label ↔ configuration) is defined in later chapters, but this spec assumes that **the graph is the canonical structural model** for a scenario.
+
+- **GraphMask**  
+  A wrapper around a `Vector[BOOL]`:
+
+  - Represents a selection of vertices (a subgraph).
+  - Can be persisted temporarily in `graph.vertex_masks` using a UUID.
+  - Enables efficient DB queries by joining on the mask instead of sending large `IN` lists.
+
+The graph/scenario subsystem is orthogonal to the runtime in implementation, but conceptually it is the **source of truth for simulation structure**: runtime components (Workers, NodeControllers, simprocs) are configured from graph and scenario metadata rather than ad-hoc configuration.
+
+### 2.8 Configuration and Settings
+
+- **Application configuration**  
+  Disco uses a config module (e.g. `config.py`) with Pydantic models to configure:
+
+  - Logging
+  - Database (SQLAlchemy engine)
+  - Metastore / ZooKeeper connection
+  - gRPC settings (bind address, timeouts, keepalive, compression, retry policies)
+
+- **GrpcSettings** (excerpt)  
+  Includes fields such as:
+
+  - `bind_host`, `bind_port`, `timeout_s`, `max_workers`, `grace_s`
+  - Message size limits and keepalive options
+  - `compression`
+  - Promise retry configuration:
+    - `promise_retry_delays_s` (backoff sequence, e.g. `[0.05, 0.15, 0.5, 1.0, 2.0]`)
+    - `promise_retry_max_window_s` (e.g. `3.0` seconds)
+
+These settings are consumed by the gRPC server and `GrpcTransport` to ensure consistent behavior across applications and environments.
 
 ## 3 Metadata Store (Zookeeper‑Backed)
 
@@ -200,60 +434,194 @@ These are used for lightweight inter-node message passing or distribution of pen
   - group namespacing in paths
   - handling of scalar vs dictionary values in expansion
 
+
 ## 4 Cluster
 
-### Purpose
+### 4.1 Purpose
 
-The **Cluster** component provides a high-level, in-process view of the running simulation cluster, backed by the Metadata Store (ZooKeeper).
+The **Cluster** component provides a high-level, read-mostly, strictly in-process representation of the current simulation topology. It is built entirely on top of the `Metastore` (Chapter 3), which abstracts all ZooKeeper behavior, connection management, and watcher restoration.
 
-Cluster is responsible for:
+Cluster has no knowledge of Worker internals. It never interacts with Worker objects, NodeControllers, transports, or runtime execution. Its sole responsibility is to interpret metadata exposed in the Metastore and present a coherent view of:
 
-- Tracking which workers are currently registered in the system.
-- Tracking which nodes (and replications) are hosted on which worker.
-- Providing an address book that maps nodes/replications to a network address usable by transports.
-- Exposing the address of the local application process.
+- Which workers exist,
+- Which nodes they host,
+- Their experiment (`expid`) and replication (`repid`), both UUID4,
+- Their application and NUMA grouping,
+- Their runtime state,
+- How to route messages to them.
 
-Cluster is read-mostly from the perspective of the routing/transport layer; it is updated asynchronously in response to ZooKeeper watches.
+This metadata is consumed by the transport layer and by the Worker lifecycle controller.
 
-### Address Book
+### 4.2 Worker Metadata (Persistent)
 
-Cluster exposes a read-only property, conceptually:
+Each Worker process publishes structured metadata in the Metastore under:
 
-```python
-address_book: Mapping[tuple[int, str], str]  # (repid, node) -> address (e.g. "host:port")
+```
+/simulation/workers/{worker_address}/
 ```
 
-Where:
+All of these keys are written atomically using `Metastore.update_keys()`.
 
-- `repid` is the replication id of the experiment.
-- `node` is the node name.
-- `address` is a logical endpoint string for the worker that currently hosts that node/replication.
-  - Multiple processes belonging to the same logical worker may share the same address.
-  - Each application process that can receive IPC messages should have a unique address.
+#### Metadata fields
 
-Registered workers are tracked under the logical path `/simulation/registered_workers`, and per-worker metadata
-lives under `/simulation/workers/<worker_id>`.
+| Key | Type | Description |
+|-----|-------|-------------|
+| `expid` | UUID4 string | Experiment ID to which this worker belongs |
+| `repid` | UUID4 string | Replication ID for this worker |
+| `partition` | int | Partition index within the replication |
+| `nodes` | list[str] | Names of nodes hosted on this worker |
+| `application_id` | UUID4 string | Identifier of the application process that spawned the worker |
+| `numa_node` | int | NUMA node on which the worker runs |
 
-The routing and transport layer uses this address book to determine:
+Cluster treats this metadata as definitive topology information.
 
-- Whether a given `(repid, node)` is local to the current process.
-- Whether a given `(repid, node)` is reachable via IPC queues.
-- Otherwise, that the node must be reached via gRPC.
+#### Malformed or incomplete metadata
 
-### Local Address
+If Cluster encounters missing, malformed, or nonsensical metadata:
 
-Each worker that participates in the cluster must know its own address:
+**The corresponding worker is considered BROKEN.**
 
-```python
-local_address: str  # same format as in address_book values
+Cluster does not attempt partial interpretation or correction. The orchestration layer must recreate the worker.
+
+### 4.3 Worker State (Ephemeral)
+
+Each worker publishes its runtime state in an ephemeral key:
+
+```
+/simulation/registered_workers/{worker_address}
 ```
 
-### Consistency & Failure Semantics
+The value is an integer representing `WorkerState`:
 
-- Cluster maintains its internal state using a lock to ensure thread-safety.
-- Data is reconstructed on each process startup from the Metadata Store.
-- Temporary inconsistencies (e.g. during ZooKeeper reconnects) may cause lookups to fail or return stale results; routing should handle this defensively (for example, by raising errors and letting higher layers retry or fail-fast).
-- Cluster itself does not perform any routing or IPC/gRPC operations; it is a pure metadata component used by transports and schedulers.
+```
+0 CREATED
+1 AVAILABLE
+2 INITIALIZING
+3 READY
+4 ACTIVE
+5 PAUSED
+6 TERMINATED
+9 BROKEN
+```
+
+Because the node is ephemeral:
+
+- If the worker process dies, the key disappears automatically.
+- Cluster removes the worker and all associated routing information.
+
+Cluster does **not** perform any state transitions; it only reflects what the worker publishes.
+
+### 4.4 Desired State (Control Plane Input)
+
+The desired state for each worker is stored as a **single JSON blob** under:
+
+```
+/simulation/desired_state/{worker_address}
+```
+
+The blob includes:
+
+- `expid: UUID4`
+- `repid: UUID4`
+- `partition: int`
+- `nodes: list[str]`
+- `target_state: int` (WorkerState)
+
+Cluster does not interpret the meaning of these fields. It only:
+
+- Watches for changes,
+- Decodes the JSON blob,
+- Delivers the raw value to subscribers via `on_desired_state_change`.
+
+Workers subscribe using:
+
+```
+cluster.on_desired_state_change(worker_address, handler)
+```
+
+Cluster does not maintain an internal subscription registry—each call produces exactly one callback into user code.
+
+### 4.5 Address Book
+
+From valid worker metadata, Cluster derives a mapping:
+
+```python
+address_book: Mapping[tuple[str, str], str]
+# (repid: UUID4, node_name: str) -> worker_address: str
+```
+
+Semantics:
+
+- For each `(repid, node)`, the address identifies where the node is hosted.
+- This address may serve multiple nodes or partitions.
+- UUID4 `repid` ensures globally unique replication identifiers.
+
+Cluster also exposes helper classification functions:
+
+```python
+is_local_address(worker_address: str, application_id: str) -> bool
+is_ipc_reachable(worker_address: str, application_id: str, numa_node: int) -> bool
+is_remote_address(worker_address: str) -> bool
+```
+
+These guides transport selection but do not perform routing themselves.
+
+### 4.6 Internal Data Structures
+
+Cluster maintains synchronized in-memory structures:
+
+- `worker_meta: dict[worker_address, WorkerInfo]`
+- `worker_state: dict[worker_address, WorkerState]`
+- `desired_state: dict[worker_address, dict]`
+- `address_book: Mapping[(repid, node), worker_address]`
+- `application_groups: dict[application_id, set[worker_address]]`
+- `numa_layout: dict[worker_address, int]`
+
+All modifications occur under a Cluster-level lock to guarantee consistency.
+
+Watch callbacks from Metastore update only the affected sections.
+
+### 4.7 Error Model and Recovery
+
+#### Metastore disconnection
+
+Handled **entirely** by Metastore. Cluster:
+
+- Does not manage watchers,
+- Does not manage reconnection,
+- Does not implement failover logic.
+
+When the Metastore reconnects, Cluster naturally receives updated callbacks and rebuilds state.
+
+#### Malformed metadata
+
+If a worker publishes invalid metadata:
+
+- Cluster treats it as a fatal condition for that worker.
+- The worker must be recreated by orchestration.
+- Cluster removes the worker from routing.
+
+#### Worker removal
+
+If the ephemeral key disappears:
+
+- The worker is immediately removed.
+- All routing entries for nodes it hosted are dropped.
+
+Cluster never attempts to reassign or recover nodes.
+
+### 4.8 Non-Responsibilities
+
+Cluster explicitly does **not**:
+
+- Infer the local worker's address,
+- Interact with Workers or NodeControllers,
+- Perform routing or transport selection,
+- Modify or validate desired-state semantics,
+- Move workers through the state machine,
+- Handle Metastore recovery mechanisms.
+
+It is a pure metadata reflector, translating the contents of the Metastore into in-memory structures for other components to consume.
 
 
 ## 5 Routing & Transport
@@ -314,14 +682,14 @@ Constructor (simplified):
 
 ```python
 from typing import Any, Callable
-from .router import ServerRouter
+from .router import WorkerRouter
 
 
 class NodeController:
     def __init__(
         self,
         node_name: str,
-        router: ServerRouter,
+        router: WorkerRouter,
         serializer: Callable[[Any], bytes],
     ) -> None:
         self._node_name = node_name
@@ -358,7 +726,7 @@ Behaviour:
    - Call `_deliver_local_event` or `_deliver_local_promise`.
 5. Otherwise:
    - Create an `EventEnvelope` or `PromiseEnvelope`.
-   - Delegate to `ServerRouter`.
+   - Delegate to `WorkerRouter`.
 
 Local delivery hooks are intentionally left to the simulation layer:
 
@@ -410,7 +778,7 @@ def receive_promise(self, envelope: PromiseEnvelope) -> None:
 
 **File:** `src/disco/router.py`
 
-The `ServerRouter` owns one or more transports and chooses which one to use for a given envelope based on:
+The `WorkerRouter` owns one or more transports and chooses which one to use for a given envelope based on:
 
 - The target node.
 - The current replication id (`repid`).
@@ -424,7 +792,7 @@ from .transports.base import Transport
 from .cluster import Cluster  # conceptual import
 
 
-class ServerRouter:
+class WorkerRouter:
     def __init__(
         self,
         cluster: Cluster,
@@ -903,7 +1271,7 @@ A `NodeController` owns an internal **EventQueue** that receives both events and
 - The NodeController:
   - Serializes outbound event payloads to `bytes`.
   - Constructs `EventEnvelope` and `PromiseEnvelope` objects for non-local targets.
-  - Delegates delivery of these envelopes to a `ServerRouter`.
+  - Delegates delivery of these envelopes to a `WorkerRouter`.
 
 - For **inbound** messages, transports eventually call:
   ```python
@@ -916,9 +1284,9 @@ NodeController implementation details (queue type, ordering rules, simproc execu
 
 ---
 
-### 6.3 ServerRouter
+### 6.3 WorkerRouter
 
-The `ServerRouter` is responsible for choosing the appropriate transport for each envelope. Its decision is based on:
+The `WorkerRouter` is responsible for choosing the appropriate transport for each envelope. Its decision is based on:
 
 - Replication ID (`repid`)
 - Target node name
@@ -928,7 +1296,7 @@ The `ServerRouter` is responsible for choosing the appropriate transport for eac
 Conceptual skeleton:
 
 ```python
-class ServerRouter:
+class WorkerRouter:
     def __init__(self, cluster, transports, repid: str):
         self._cluster = cluster
         self._transports = list(transports)
@@ -1345,7 +1713,7 @@ A Worker configures its transports in a deterministic order, typically:
 2. `IPCTransport`
 3. `GrpcTransport`
 
-`ServerRouter` respects this order when choosing a transport. This ensures:
+`WorkerRouter` respects this order when choosing a transport. This ensures:
 
 - Local nodes are always handled locally when possible.
 - Same-machine, other-process nodes go through IPC.
@@ -1397,7 +1765,7 @@ Tests for routing and transport SHOULD validate at least the following:
   - `InProcessTransport.handles_node` returns `True` only for nodes hosted in the same process.
   - `IPCTransport.handles_node` returns `True` only for nodes reachable via IPC queues.
   - `GrpcTransport.handles_node` returns `True` only for nodes whose addresses are classified as remote.
-  - `ServerRouter` chooses the correct transport based on:
+  - `WorkerRouter` chooses the correct transport based on:
     - Locality of the target node.
     - Transport priority order.
 
