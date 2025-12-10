@@ -19,7 +19,7 @@ from concurrent import futures
 from multiprocessing import Queue
 from typing import TYPE_CHECKING
 
-import grpc  # type: ignore[import]
+import grpc
 
 from tools.mp_logging import getLogger
 

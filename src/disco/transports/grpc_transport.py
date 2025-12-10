@@ -33,7 +33,7 @@ from dataclasses import dataclass
 import time
 from typing import Callable, Dict, Iterable, Optional
 
-import grpc  # type: ignore[import]
+import grpc
 
 from ..cluster import Cluster, WorkerState
 from ..config import GrpcSettings
