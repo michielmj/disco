@@ -5,11 +5,13 @@ from typing import Any, Callable, List, Tuple
 
 from disco.cluster import (
     Cluster,
-    State,
+    WorkerState,
     WorkerInfo,
+    DesiredWorkerState,
     REGISTERED_WORKERS,
     WORKERS,
     BASE_STRUCTURE,
+    DESIRED_STATE
 )
 
 
@@ -181,13 +183,13 @@ def test_register_and_unregister_worker(meta: FakeMetastore, cluster: Cluster):
     # Initially nothing in REGISTERED_WORKERS
     assert REGISTERED_WORKERS not in meta.data
 
-    cluster.register_worker("s1", state=State.INITIALIZING)
+    cluster.register_worker("s1", state=WorkerState.INITIALIZING)
 
     # WorkerInfo was written (shallow layout)
     assert meta.get_keys(f"{WORKERS}/s1") == asdict(WorkerInfo())
 
     # Active worker node with state
-    assert meta.get_key(f"{REGISTERED_WORKERS}/s1") == State.INITIALIZING
+    assert meta.get_key(f"{REGISTERED_WORKERS}/s1") == WorkerState.INITIALIZING
 
     # Trigger children watch to let Cluster install its per-worker watches
     path, children_cb = meta.children_watches[0]
@@ -195,8 +197,8 @@ def test_register_and_unregister_worker(meta: FakeMetastore, cluster: Cluster):
     children_cb(["s1"], path)
 
     # In-memory state should now be visible
-    assert cluster.get_worker_state("s1") == State.INITIALIZING
-    assert cluster.worker_states["s1"] == State.INITIALIZING
+    assert cluster.get_worker_state("s1") == WorkerState.INITIALIZING
+    assert cluster.worker_states["s1"] == WorkerState.INITIALIZING
 
     # Unregister removes the registered node entry
     cluster.unregister_worker("s1")
@@ -207,27 +209,27 @@ def test_register_and_unregister_worker(meta: FakeMetastore, cluster: Cluster):
 
 
 def test_set_and_get_worker_state_updates_internal_state(meta: FakeMetastore, cluster: Cluster):
-    cluster.register_worker("s1", state=State.CREATED)
+    cluster.register_worker("s1", state=WorkerState.CREATED)
 
     # Trigger children watch to attach state watcher
     path, children_cb = meta.children_watches[0]
     children_cb(["s1"], path)
 
     # Initial state from metastore
-    assert cluster.get_worker_state("s1") == State.CREATED
-    assert cluster.worker_states["s1"] == State.CREATED
+    assert cluster.get_worker_state("s1") == WorkerState.CREATED
+    assert cluster.worker_states["s1"] == WorkerState.CREATED
 
     # Change state via Cluster API
-    cluster.set_worker_state("s1", State.AVAILABLE)
+    cluster.set_worker_state("s1", WorkerState.AVAILABLE)
 
     # Data is stored in metastore
-    assert meta.get_key(f"{REGISTERED_WORKERS}/s1") == State.AVAILABLE
+    assert meta.get_key(f"{REGISTERED_WORKERS}/s1") == WorkerState.AVAILABLE
     # And internal view is updated by the watch
-    assert cluster.worker_states["s1"] == State.AVAILABLE
+    assert cluster.worker_states["s1"] == WorkerState.AVAILABLE
 
 
 def test_update_worker_info_and_address_book(meta: FakeMetastore, cluster: Cluster):
-    cluster.register_worker("s1", state=State.AVAILABLE)
+    cluster.register_worker("s1", state=WorkerState.AVAILABLE)
 
     # Write info first
     cluster.update_worker_info("s1", repid="r1", nodes=["n1", "n2"])
@@ -244,9 +246,9 @@ def test_update_worker_info_and_address_book(meta: FakeMetastore, cluster: Clust
 
 def test_get_available_prefers_matching_expid_and_unique_partitions(meta: FakeMetastore, cluster: Cluster):
     # Register three workers in AVAILABLE state
-    cluster.register_worker("s1", state=State.AVAILABLE)
-    cluster.register_worker("s2", state=State.AVAILABLE)
-    cluster.register_worker("s3", state=State.AVAILABLE)
+    cluster.register_worker("s1", state=WorkerState.AVAILABLE)
+    cluster.register_worker("s2", state=WorkerState.AVAILABLE)
+    cluster.register_worker("s3", state=WorkerState.AVAILABLE)
 
     # Add worker info with expid/partition
     cluster.update_worker_info("s1", expid="exp1", partition=0)
@@ -268,3 +270,90 @@ def test_get_available_prefers_matching_expid_and_unique_partitions(meta: FakeMe
 
     # The remaining worker is "others"
     assert set(workers[2:]) == {"s3"}
+
+
+# ---------------------------------------------------------------------------
+# Desired state tests
+# ---------------------------------------------------------------------------
+
+def test_set_desired_state_writes_desired_worker_state(meta: FakeMetastore, cluster: Cluster):
+    worker = "w1"
+    cluster.set_desired_state(
+        worker_address=worker,
+        state=WorkerState.READY,
+        expid="exp-1",
+        repid="rep-1",
+        partition=2,
+        nodes=["n1", "n2"],
+    )
+
+    desired_path = f"{DESIRED_STATE}/{worker}/desired"
+    value = meta.get_key(desired_path)
+
+    assert isinstance(value, DesiredWorkerState)
+    assert value.state == WorkerState.READY
+    assert value.expid == "exp-1"
+    assert value.repid == "rep-1"
+    assert value.partition == 2
+    assert value.nodes == ["n1", "n2"]
+    assert isinstance(value.request_id, str)
+    assert value.request_id  # non-empty
+
+
+def test_on_desired_state_change_calls_handler_and_writes_ack_success(meta: FakeMetastore, cluster: Cluster):
+    worker = "w2"
+
+    # First write a desired state so the watch sees a non-None initial value
+    cluster.set_desired_state(worker_address=worker, state=WorkerState.ACTIVE)
+    desired_path = f"{DESIRED_STATE}/{worker}/desired"
+    desired_obj = meta.get_key(desired_path)
+    assert isinstance(desired_obj, DesiredWorkerState)
+
+    received: list[DesiredWorkerState] = []
+
+    def handler(desired: DesiredWorkerState) -> str | None:
+        received.append(desired)
+        return None  # success
+
+    cluster.on_desired_state_change(worker, handler)
+
+    # Handler should have been called once (FakeMetastore calls immediately)
+    assert len(received) == 1
+    assert received[0] is desired_obj
+
+    ack_path = f"{DESIRED_STATE}/{worker}/ack"
+    ack = meta.get_key(ack_path)
+    assert isinstance(ack, dict)
+    assert ack["request_id"] == desired_obj.request_id
+    assert ack["success"] is True
+    assert ack["error"] is None
+
+
+def test_on_desired_state_change_writes_ack_on_error(meta: FakeMetastore, cluster: Cluster):
+    worker = "w3"
+
+    # Write initial desired state
+    cluster.set_desired_state(worker_address=worker, state=WorkerState.PAUSED)
+    desired_path = f"{DESIRED_STATE}/{worker}/desired"
+    desired_obj = meta.get_key(desired_path)
+    assert isinstance(desired_obj, DesiredWorkerState)
+
+    received: list[DesiredWorkerState] = []
+
+    def handler(desired: DesiredWorkerState) -> str | None:
+        received.append(desired)
+        return "boom"  # simulate failure
+
+    cluster.on_desired_state_change(worker, handler)
+
+    # Handler should have been called once
+    assert len(received) == 1
+    assert received[0] is desired_obj
+
+    ack_path = f"{DESIRED_STATE}/{worker}/ack"
+    ack = meta.get_key(ack_path)
+    assert isinstance(ack, dict)
+    assert ack["request_id"] == desired_obj.request_id
+    assert ack["success"] is False
+    assert ack["error"] == "boom"
+    

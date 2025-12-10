@@ -513,33 +513,80 @@ Cluster does **not** perform any state transitions; it only reflects what the wo
 
 ### 4.4 Desired State (Control Plane Input)
 
-The desired state for each worker is stored as a **single JSON blob** under:
+Each worker receives its desired operational state via a **single structured value** stored under:
 
+```python
+/simulation/desired_state/{worker_address}/desired
 ```
-/simulation/desired_state/{worker_address}
+
+This value is written atomically by the orchestrator as an object of type:
+
+```python
+DesiredWorkerState:
+    request_id: UUID4
+    expid: UUID4 | None
+    repid: UUID4 | None
+    partition: int | None
+    nodes: list[str] | None
+    state: WorkerState
 ```
 
-The blob includes:
+**Serialization and deserialization are fully handled by the Metastore.**
 
-- `expid: UUID4`
-- `repid: UUID4`
-- `partition: int`
-- `nodes: list[str]`
-- `target_state: int` (WorkerState)
+Cluster neither serializes nor deserializes these values—it receives and emits Python objects exactly as returned by the 
+Metastore’s unpackb function.
 
-Cluster does not interpret the meaning of these fields. It only:
+#### Cluster Responsibilities
 
-- Watches for changes,
-- Decodes the JSON blob,
-- Delivers the raw value to subscribers via `on_desired_state_change`.
+Cluster does **not** interpret the fields inside the desired state. Its responsibilities are limited to:
 
-Workers subscribe using:
+- Installing a watch on the worker’s desired-state path.
+- Receiving decoded values from the Metastore upon change.
+- Delivering them to subscriber code via:
 
-```
+```python
 cluster.on_desired_state_change(worker_address, handler)
 ```
 
-Cluster does not maintain an internal subscription registry—each call produces exactly one callback into user code.
+The handler signature is:
+
+```python
+handler(desired_state: DesiredWorkerState) -> str | None
+```
+
+Return semantics:
+
+- `None` → request accepted successfully  
+- `str` → error message; request considered failed
+
+Cluster writes the acknowledgment to:
+
+```python
+/simulation/desired_state/{worker_address}/ack
+```
+
+Acknowledgment structure:
+
+```python
+{
+    request_id: <same as input>,
+    success: bool,
+    error: str | None
+}
+```
+
+#### Subscription Model
+
+Cluster does **not** maintain any internal list of subscribers.
+
+Each call to:
+
+```python
+on_desired_state_change(worker_address, handler)
+```
+
+installs exactly one watcher via Metastore, and the handler is invoked for every update until the watch is removed 
+(e.g., deletion of the node or callback returning False).
 
 ### 4.5 Address Book
 

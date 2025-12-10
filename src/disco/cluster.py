@@ -1,10 +1,13 @@
-from functools import partial
-from threading import Condition, RLock
-from dataclasses import asdict, dataclass, field
-from typing import Mapping, cast
+from __future__ import annotations
 
 from enum import IntEnum
 from types import MappingProxyType
+import uuid
+from functools import partial
+from threading import Condition, RLock
+from dataclasses import asdict, dataclass, field
+from typing import Mapping, cast, Callable, Any
+
 
 from tools.mp_logging import getLogger
 from disco.metastore import Metastore
@@ -12,15 +15,15 @@ from disco.metastore import Metastore
 logger = getLogger(__name__)
 
 
-class State(IntEnum):
-    CREATED = 1
+class WorkerState(IntEnum):
+    CREATED = 0
+    AVAILABLE = 1
     INITIALIZING = 2
-    AVAILABLE = 3
-    ALLOCATED = 4
-    ACTIVE = 5
-    PAUSED = 6
-    DISPOSING = 7
-    BROKEN = 8
+    READY = 3
+    ACTIVE = 4
+    PAUSED = 5
+    TERMINATED = 6
+    BROKEN = 9
 
 
 @dataclass(slots=True)
@@ -31,10 +34,21 @@ class WorkerInfo:
     nodes: list[str] = field(default_factory=list)
 
 
+@dataclass(slots=True)
+class DesiredWorkerState:
+    request_id: str
+    expid: str | None
+    repid: str | None
+    partition: int | None
+    nodes: list[str] | None
+    state: WorkerState
+
+
 PROCESSES = "/simulation/processes"
 NPARTITIONS = "/simulation/npartitions"
 REGISTERED_WORKERS = "/simulation/registered_workers"
 WORKERS = "/simulation/workers"
+DESIRED_STATE = "/simulation/desired_state"
 EXPERIMENTS = "/simulation/experiments"
 SCHEDULER_QUEUE = "/simulation/queue"
 ADDRESS_BOOK = "/simulation/address_book"
@@ -80,7 +94,7 @@ class Cluster:
         self._available_condition = Condition(self._lock)
 
         # Internal state
-        self._worker_state: dict[str, State] = {}
+        self._worker_state: dict[str, WorkerState] = {}
         self._worker_nodes: dict[str, list[str]] = {}
         self._worker_repids: dict[str, str] = {}
 
@@ -117,7 +131,7 @@ class Cluster:
 
             for address in appends:
                 # Seed in-memory structures so watch callbacks don't early-return.
-                self._worker_state[address] = State.CREATED
+                self._worker_state[address] = WorkerState.CREATED
                 self._worker_nodes[address] = []
                 self._worker_repids[address] = ""
 
@@ -141,9 +155,9 @@ class Cluster:
 
         return True
 
-    def _watch_worker_state(self, address: str, state: State, _path: str) -> bool:
+    def _watch_worker_state(self, address: str, state: WorkerState, _path: str) -> bool:
         """
-        Called with decoded `state` (State enum) by Metastore.
+        Called with decoded `state` (WorkerState enum) by Metastore.
         """
         with self._lock:
             if address not in self._worker_state:
@@ -205,7 +219,7 @@ class Cluster:
             return MappingProxyType(dict(self._address_book))
 
     @property
-    def worker_states(self) -> Mapping[str, State]:
+    def worker_states(self) -> Mapping[str, WorkerState]:
         with self._lock:
             return MappingProxyType(dict(self._worker_state))
 
@@ -239,7 +253,7 @@ class Cluster:
 
         with self._lock:
             for address, state in self._worker_state.items():
-                if state == State.AVAILABLE:
+                if state == WorkerState.AVAILABLE:
                     full_status = self.get_worker_info(address)
                     if (
                         full_status.expid == expid
@@ -267,7 +281,7 @@ class Cluster:
             raise KeyError(f"Worker `{address}` has no info.")
         return WorkerInfo(**data)
 
-    def register_worker(self, worker: str, state: State = State.CREATED) -> None:
+    def register_worker(self, worker: str, state: WorkerState = WorkerState.CREATED) -> None:
         """
         Registers a worker.
         """
@@ -287,14 +301,14 @@ class Cluster:
         else:
             raise RuntimeError(f"Worker {worker} not registered.")
 
-    def set_worker_state(self, worker: str, state: State) -> None:
+    def set_worker_state(self, worker: str, state: WorkerState) -> None:
         registered_path = f"{REGISTERED_WORKERS}/{worker}"
         if registered_path not in self.meta:
             raise RuntimeError(f"Worker {worker} not registered.")
 
         self.meta.update_key(registered_path, state)
 
-    def get_worker_state(self, worker: str) -> State:
+    def get_worker_state(self, worker: str) -> WorkerState:
         registered_path = f"{REGISTERED_WORKERS}/{worker}"
         if registered_path not in self.meta:
             raise RuntimeError(f"Worker {worker} not registered.")
@@ -303,7 +317,7 @@ class Cluster:
         if raw is None:
             raise RuntimeError(f"Worker {worker} has no state set.")
 
-        return cast(State, raw)
+        return cast(WorkerState, raw)
 
     def update_worker_info(
         self,
@@ -326,6 +340,71 @@ class Cluster:
         ):
             if att is not None:
                 self.meta.update_key(f"{worker_path}/{name}", att)
+
+    # ------------------------------------------------------------------ #
+    # Handle desired state changes
+    # ------------------------------------------------------------------ #
+
+    def on_desired_state_change(
+            self,
+            worker_address: str,
+            handler: Callable[[DesiredWorkerState], str | None],
+    ) -> uuid.UUID:
+        """
+        Register a callback that receives desired-state changes for `worker_address`.
+
+        The handler is called with a DesiredWorkerState and must return:
+          - None    -> success
+          - str(...) -> error message
+        An ack object is written to the corresponding ack path.
+        """
+        desired_path = f"{DESIRED_STATE}/{worker_address}/desired"
+        ack_path = f"{DESIRED_STATE}/{worker_address}/ack"
+
+        def _callback(value: Any, _) -> bool:
+            # `value` is already decoded by Metastore (likely a dict).
+
+            try:
+                error_msg = handler(cast(DesiredWorkerState, value))
+            except Exception as exc:
+                error_msg = f"Handler error: {exc!r}"
+
+            self.meta.update_key(
+                ack_path,
+                {
+                    "request_id": cast(DesiredWorkerState, value).request_id,
+                    "success": error_msg is None,
+                    "error": error_msg,
+                },
+            )
+
+            return True  # continue watching
+
+        return self.meta.watch_with_callback(desired_path, _callback)
+
+    def set_desired_state(
+            self,
+            worker_address: str,
+            state: WorkerState,
+            expid: str | None = None,
+            repid: str | None = None,
+            partition: int | None = None,
+            nodes: list[str] | None = None,
+    ) -> str:
+        desired_path = f"{DESIRED_STATE}/{worker_address}/desired"
+        request_id = str(uuid.uuid4())
+
+        desired = DesiredWorkerState(
+            request_id=request_id,
+            state=state,
+            expid=expid,
+            repid=repid,
+            partition=partition,
+            nodes=nodes,
+        )
+
+        self.meta.update_key(desired_path, desired)
+        return request_id
 
     # ------------------------------------------------------------------ #
     # Logging hook
