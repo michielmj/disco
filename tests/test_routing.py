@@ -21,8 +21,8 @@ def test_local_event_delivery() -> None:
     without going through any transport, with the payload serialized once.
     """
     cluster = FakeCluster()
-    router = WorkerRouter(cluster=cluster, transports=[], repid="1")
-    controller = NodeController("alpha", router)
+    router = WorkerRouter(cluster=cluster, transports=[])
+    controller = NodeController("alpha", "e1", "r1", 0, router)
 
     captured: List[EventEnvelope] = []
 
@@ -50,8 +50,8 @@ def test_self_alias_uses_local_delivery() -> None:
     still use local delivery (no transport).
     """
     cluster = FakeCluster()
-    router = WorkerRouter(cluster=cluster, transports=[], repid="2")
-    controller = NodeController("gamma", router)
+    router = WorkerRouter(cluster=cluster, transports=[])
+    controller = NodeController("gamma", "e1", "r1", 0, router)
 
     captured: List[EventEnvelope] = []
 
@@ -76,7 +76,7 @@ def test_remote_event_serialization_once() -> None:
     construct an EventEnvelope, and pass it through the router/transport.
     """
     cluster = FakeCluster()
-    cluster.address_book[("1", "beta")] = "local"
+    cluster.address_book[("r1", "beta")] = "local"
 
     received: list[EventEnvelope] = []
 
@@ -84,12 +84,12 @@ def test_remote_event_serialization_once() -> None:
         received.append(envelope)
 
     # Receiver side: capture the envelope at receive_event level
-    receiver_router = WorkerRouter(cluster=cluster, transports=[], repid="1")
-    receiver = NodeController("beta", receiver_router)
+    receiver_router = WorkerRouter(cluster=cluster, transports=[])
+    receiver = NodeController("beta", "e1", "r1", 0, receiver_router)
     receiver.receive_event = record_envelope  # type: ignore[assignment]
 
     transport = InProcessTransport(nodes={"beta": receiver}, cluster=cluster)
-    sender_router = WorkerRouter(cluster=cluster, transports=[transport], repid="1")
+    sender_router = WorkerRouter(cluster=cluster, transports=[transport])
 
     calls: list[bytes] = []
 
@@ -98,7 +98,7 @@ def test_remote_event_serialization_once() -> None:
         return pickle.dumps(obj)
 
     # Sender uses custom serializer
-    sender = NodeController("alpha", sender_router, serializer=serializer)
+    sender = NodeController("alpha", "e1", "r1", 0, sender_router, serializer=serializer)
 
     sender.send_event("beta/main", epoch=3.0, data=b"remote")
 
@@ -116,20 +116,20 @@ def test_remote_promise_via_transport() -> None:
     through the transport, ending up at the receiver's receive_promise().
     """
     cluster = FakeCluster()
-    cluster.address_book[("1", "beta")] = "local"
+    cluster.address_book[("r1", "beta")] = "local"
 
     received_promises: list[PromiseEnvelope] = []
 
     def record_promise(envelope: PromiseEnvelope) -> None:
         received_promises.append(envelope)
 
-    receiver_router = WorkerRouter(cluster=cluster, transports=[], repid="1")
-    receiver = NodeController("beta", receiver_router)
+    receiver_router = WorkerRouter(cluster=cluster, transports=[])
+    receiver = NodeController("beta", "e1", "r1", 0, receiver_router)
     receiver.receive_promise = record_promise  # type: ignore[assignment]
 
     transport = InProcessTransport(nodes={"beta": receiver}, cluster=cluster)
-    sender_router = WorkerRouter(cluster=cluster, transports=[transport], repid="1")
-    sender = NodeController("alpha", sender_router)
+    sender_router = WorkerRouter(cluster=cluster, transports=[transport])
+    sender = NodeController("alpha", "e1", "r1", 0, sender_router)
 
     sender.send_promise("beta/control", seqnr=7, epoch=4.5, num_events=2)
 
@@ -148,20 +148,20 @@ def test_remote_event_through_transport() -> None:
     receiver's receive_event() as an EventEnvelope with serialized data.
     """
     cluster = FakeCluster()
-    cluster.address_book[("1", "beta")] = "local"
+    cluster.address_book[("r1", "beta")] = "local"
 
     received: list[EventEnvelope] = []
 
     def record_envelope(envelope: EventEnvelope) -> None:
         received.append(envelope)
 
-    receiver_router = WorkerRouter(cluster=cluster, transports=[], repid="1")
-    receiver = NodeController("beta", receiver_router)
+    receiver_router = WorkerRouter(cluster=cluster, transports=[])
+    receiver = NodeController("beta", "e1", "r1", 0, receiver_router)
     receiver.receive_event = record_envelope  # type: ignore[assignment]
 
     transport = InProcessTransport(nodes={"beta": receiver}, cluster=cluster)
-    sender_router = WorkerRouter(cluster=cluster, transports=[transport], repid="1")
-    sender = NodeController("alpha", sender_router)
+    sender_router = WorkerRouter(cluster=cluster, transports=[transport])
+    sender = NodeController("alpha", "e1", "r1", 0, sender_router)
 
     sender.send_event("beta/main", epoch=5.0, data=b"via-transport")
 

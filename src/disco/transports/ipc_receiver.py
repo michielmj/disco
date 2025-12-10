@@ -39,6 +39,7 @@ class IPCReceiver:
     def _process_event(self, msg: IPCEventMsg) -> None:
         data = self._extract_event_data(msg)
         envelope = EventEnvelope(
+            repid=msg.repid,
             target_node=msg.target_node,
             target_simproc=msg.target_simproc,
             epoch=msg.epoch,
@@ -52,6 +53,7 @@ class IPCReceiver:
 
     def _process_promise(self, msg: IPCPromiseMsg) -> None:
         envelope = PromiseEnvelope(
+            repid=msg.repid,
             target_node=msg.target_node,
             target_simproc=msg.target_simproc,
             seqnr=msg.seqnr,

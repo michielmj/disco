@@ -10,6 +10,7 @@ from typing import Final
 class EventEnvelope:
     """Container for event payloads destined for a simulation process."""
 
+    repid: str
     target_node: str
     target_simproc: str
     epoch: float
@@ -23,6 +24,7 @@ class EventEnvelope:
 class PromiseEnvelope:
     """Container for promise messages destined for a simulation process."""
 
+    repid: str
     target_node: str
     target_simproc: str
     seqnr: int

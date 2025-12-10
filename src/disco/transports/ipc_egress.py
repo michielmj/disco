@@ -32,17 +32,18 @@ class IPCTransport(Transport):
             return False
         return addr in self._event_queues and addr in self._promise_queues
 
-    def send_event(self, repid: str, envelope: EventEnvelope) -> None:
+    def send_event(self, envelope: EventEnvelope) -> None:
         try:
-            addr = self._cluster.address_book[(repid, envelope.target_node)]
+            addr = self._cluster.address_book[(envelope.repid, envelope.target_node)]
         except KeyError as exc:
             raise KeyError(
-                f"IPCTransport: no address for (repid={repid!r}, node={envelope.target_node!r})"
+                f"IPCTransport: no address for (repid={envelope.repid!r}, node={envelope.target_node!r})"
             ) from exc
         queue = self._event_queues[addr]
 
         if len(envelope.data) <= self._large_payload_threshold:
             msg = IPCEventMsg(
+                repid=envelope.repid,
                 target_node=envelope.target_node,
                 target_simproc=envelope.target_simproc,
                 epoch=envelope.epoch,
@@ -61,6 +62,7 @@ class IPCTransport(Transport):
                 buf[: len(envelope.data)] = envelope.data
 
                 msg = IPCEventMsg(
+                    repid=envelope.repid,
                     target_node=envelope.target_node,
                     target_simproc=envelope.target_simproc,
                     epoch=envelope.epoch,
@@ -76,10 +78,11 @@ class IPCTransport(Transport):
                 # So we can optionally track success and only unlink on early failure.
                 pass
 
-    def send_promise(self, repid: str, envelope: PromiseEnvelope) -> None:
-        addr = self._cluster.address_book[(repid, envelope.target_node)]
+    def send_promise(self, envelope: PromiseEnvelope) -> None:
+        addr = self._cluster.address_book[(envelope.repid, envelope.target_node)]
         queue = self._promise_queues[addr]
         msg = IPCPromiseMsg(
+            repid=envelope.repid,
             target_node=envelope.target_node,
             target_simproc=envelope.target_simproc,
             seqnr=envelope.seqnr,

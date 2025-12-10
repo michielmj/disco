@@ -1,19 +1,23 @@
 syntax = "proto3";
 
+package disco.transports.proto;
+
 message EventEnvelopeMsg {
-  string target_node    = 1;
-  string target_simproc = 2;
-  double epoch          = 3;
-  bytes data            = 4;
-  map<string, string> headers = 5;
+  string repid          = 1;
+  string target_node    = 2;
+  string target_simproc = 3;
+  double epoch          = 4;
+  bytes data            = 5;
+  map<string, string> headers = 6;
 }
 
 message PromiseEnvelopeMsg {
-  string target_node    = 1;
-  string target_simproc = 2;
-  int64 seqnr           = 3;
-  double epoch          = 4;
-  int32 num_events      = 5;
+  string repid          = 1;
+  string target_node    = 2;
+  string target_simproc = 3;
+  int64 seqnr           = 4;
+  double epoch          = 5;
+  int32 num_events      = 6;
 }
 
 message TransportAck {

@@ -24,7 +24,7 @@ Those will be added later; for now, NodeController stores incoming
 envelopes in simple lists to keep the system testable.
 """
 
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List
 
 from tools.mp_logging import getLogger
 
@@ -55,6 +55,9 @@ class NodeController:
     def __init__(
         self,
         node_name: str,
+        expid: str,
+        repid: str,
+        partition: int,
         router: WorkerRouter,
         serializer: Callable[[Any], bytes] | None = None,
     ) -> None:
@@ -72,6 +75,9 @@ class NodeController:
             the caller chooses.
         """
         self._node_name = node_name
+        self._expid = expid
+        self._repid = repid
+        self._partition = partition
         self._router = router
         self._serializer = serializer or self._default_serializer
 
@@ -80,7 +86,7 @@ class NodeController:
         self._pending_events: List[EventEnvelope] = []
         self._pending_promises: List[PromiseEnvelope] = []
 
-        logger.info("NodeController created for node=%s repid=%s", node_name, router.repid)
+        logger.info("NodeController created for node=%s repid=%s", node_name, repid)
 
     # ------------------------------------------------------------------ #
     # Properties
@@ -115,6 +121,7 @@ class NodeController:
 
         payload = self._serializer(data)
         envelope = EventEnvelope(
+            repid=self._repid,
             target_node=target_node,
             target_simproc=target_simproc,
             epoch=epoch,
@@ -149,6 +156,7 @@ class NodeController:
             target_node = self._node_name
 
         envelope = PromiseEnvelope(
+            repid=self._repid,
             target_node=target_node,
             target_simproc=target_simproc,
             seqnr=seqnr,

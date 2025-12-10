@@ -100,6 +100,7 @@ class DiscoTransportServicer(transport_pb2_grpc.DiscoTransportServicer):
                 headers = dict(msg.headers)
                 data = bytes(msg.data)  # ensure bytes type
                 ipc_msg = IPCEventMsg(
+                    repid=msg.repid,
                     target_node=msg.target_node,
                     target_simproc=msg.target_simproc,
                     epoch=msg.epoch,
@@ -146,6 +147,7 @@ class DiscoTransportServicer(transport_pb2_grpc.DiscoTransportServicer):
         self._check_ingress_allowed(context)
 
         ipc_msg = IPCPromiseMsg(
+            repid=request.repid,
             target_node=request.target_node,
             target_simproc=request.target_simproc,
             seqnr=request.seqnr,

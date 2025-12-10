@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from multiprocessing import Queue
 from multiprocessing.shared_memory import SharedMemory
 from queue import Empty
@@ -97,6 +96,7 @@ def test_ipc_egress_small_inline_event() -> None:
     assert transport.handles_node("1", "beta")
 
     envelope = EventEnvelope(
+        repid="1",
         target_node="beta",
         target_simproc="worker",
         epoch=1.0,
@@ -104,7 +104,7 @@ def test_ipc_egress_small_inline_event() -> None:
         headers={"k": "v"},
     )
 
-    transport.send_event("1", envelope)
+    transport.send_event(envelope)
     msg = _safe_get(event_queue, "IPCEventMsg")
 
     assert msg.target_node == "beta"
@@ -133,6 +133,7 @@ def test_ipc_egress_large_shm_event() -> None:
 
     payload = b"0123456789"
     envelope = EventEnvelope(
+        repid="1",
         target_node="beta",
         target_simproc="worker",
         epoch=2.0,
@@ -140,7 +141,7 @@ def test_ipc_egress_large_shm_event() -> None:
         headers={},
     )
 
-    transport.send_event("1", envelope)
+    transport.send_event(envelope)
     msg = _safe_get(event_queue, "IPCEventMsg (large)")
 
     assert msg.target_node == "beta"
@@ -174,6 +175,7 @@ def test_ipc_egress_send_promise() -> None:
     assert transport.handles_node("1", "beta")
 
     envelope = PromiseEnvelope(
+        repid="1",
         target_node="beta",
         target_simproc="worker",
         seqnr=5,
@@ -181,7 +183,7 @@ def test_ipc_egress_send_promise() -> None:
         num_events=2,
     )
 
-    transport.send_promise("1", envelope)
+    transport.send_promise(envelope)
     msg = _safe_get(promise_queue, "IPCPromiseMsg")
 
     assert msg.target_node == "beta"
@@ -198,6 +200,7 @@ def test_ipc_receiver_small_event() -> None:
     receiver = IPCReceiver(nodes={"beta": node}, event_queue=event_queue, promise_queue=promise_queue)
 
     msg = IPCEventMsg(
+        repid="1",
         target_node="beta",
         target_simproc="worker",
         epoch=4.0,
@@ -230,6 +233,7 @@ def test_ipc_receiver_large_event_unlinks_shm() -> None:
     shm.buf[: len(payload)] = payload
 
     msg = IPCEventMsg(
+        repid="1",
         target_node="beta",
         target_simproc="worker",
         epoch=5.0,
@@ -262,6 +266,7 @@ def test_ipc_receiver_promise_delivery() -> None:
     receiver = IPCReceiver(nodes={"beta": node}, event_queue=event_queue, promise_queue=promise_queue)
 
     msg = IPCPromiseMsg(
+        repid="1",
         target_node="beta",
         target_simproc="worker",
         seqnr=8,
@@ -287,6 +292,7 @@ def test_ipc_receiver_unknown_node_raises() -> None:
     receiver = IPCReceiver(nodes={}, event_queue=event_queue, promise_queue=promise_queue)
 
     msg = IPCEventMsg(
+        repid="1",
         target_node="missing",
         target_simproc="worker",
         epoch=7.0,

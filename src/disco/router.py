@@ -50,7 +50,6 @@ class WorkerRouter:
         self,
         cluster: Cluster,
         transports: Sequence[Transport],
-        repid: str,
     ) -> None:
         """
         Parameters
@@ -60,12 +59,9 @@ class WorkerRouter:
             The Router itself does not look directly at the metastore.
         transports:
             Ordered sequence of Transport instances. The first transport
-            whose `handles_node(repid, node)` returns True will be used.
-        repid:
-            Replication id for the experiment this Worker belongs to.
+            whose `handles_node(repid, node)` returns True will be used
         """
         self._cluster = cluster
-        self._repid = repid
 
         # Wrap transports with a name for debugging; fall back to class name.
         self._transports: List[TransportInfo] = []
@@ -74,8 +70,7 @@ class WorkerRouter:
             self._transports.append(TransportInfo(transport=t, name=name))
 
         logger.info(
-            "WorkerRouter created for repid=%s with transports=%s",
-            self._repid,
+            "WorkerRouter created with transports=%s",
             [ti.name for ti in self._transports],
         )
 
@@ -83,58 +78,42 @@ class WorkerRouter:
     # Public API
     # ------------------------------------------------------------------ #
 
-    @property
-    def repid(self) -> str:
-        return self._repid
-
-    def set_repid(self, repid: str) -> None:
-        """
-        Update the replication id used for routing decisions.
-
-        This is rarely needed; in most cases a WorkerRouter is tied to a
-        single replication for its lifetime. Provided here for completeness.
-        """
-        if repid == self._repid:
-            return
-        logger.info("WorkerRouter changing repid: %s -> %s", self._repid, repid)
-        self._repid = repid
-
     def send_event(self, envelope: EventEnvelope) -> None:
         """
         Route an EventEnvelope via the first Transport that claims to
         handle the target node for the current repid.
         """
-        transport = self._choose_transport(envelope.target_node)
+        transport = self._choose_transport(envelope.repid, envelope.target_node)
         logger.debug(
             "Routing event to node=%s simproc=%s via transport=%s repid=%s",
             envelope.target_node,
             envelope.target_simproc,
             transport.name,
-            self._repid,
+            envelope.repid,
         )
-        transport.transport.send_event(self._repid, envelope)
+        transport.transport.send_event(envelope)
 
     def send_promise(self, envelope: PromiseEnvelope) -> None:
         """
         Route a PromiseEnvelope via the first Transport that claims to
         handle the target node for the current repid.
         """
-        transport = self._choose_transport(envelope.target_node)
+        transport = self._choose_transport(envelope.repid, envelope.target_node)
         logger.debug(
             "Routing promise to node=%s simproc=%s seqnr=%s via transport=%s repid=%s",
             envelope.target_node,
             envelope.target_simproc,
             envelope.seqnr,
             transport.name,
-            self._repid,
+            envelope.repid,
         )
-        transport.transport.send_promise(self._repid, envelope)
+        transport.transport.send_promise(envelope)
 
     # ------------------------------------------------------------------ #
     # Internal helpers
     # ------------------------------------------------------------------ #
 
-    def _choose_transport(self, target_node: str) -> TransportInfo:
+    def _choose_transport(self, repid: str, target_node: str) -> TransportInfo:
         """
         Select the first transport that can handle the given node.
 
@@ -146,7 +125,6 @@ class WorkerRouter:
         # Optional: we can sanity-check that the node exists in the
         # address_book here, but we leave that to transports so that
         # purely in-process setups without address_book entries can work.
-        repid = self._repid
 
         for info in self._transports:
             try:

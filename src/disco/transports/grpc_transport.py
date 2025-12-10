@@ -112,7 +112,7 @@ class GrpcTransport(Transport):
         """
         return (repid, node) in self._cluster.address_book
 
-    def send_event(self, repid: str, envelope: EventEnvelope) -> None:
+    def send_event(self, envelope: EventEnvelope) -> None:
         """
         Send a single EventEnvelope via gRPC.
 
@@ -121,10 +121,11 @@ class GrpcTransport(Transport):
         matching the protobuf shape. Later this can be optimized to
         maintain long-lived streams per remote address.
         """
-        addr = self._resolve_address(repid, envelope.target_node)
+        addr = self._resolve_address(envelope.repid, envelope.target_node)
         endpoint = self._get_or_create_endpoint(addr)
 
         msg = transport_pb2.EventEnvelopeMsg(
+            repid=envelope.repid,
             target_node=envelope.target_node,
             target_simproc=envelope.target_simproc,
             epoch=envelope.epoch,
@@ -134,7 +135,7 @@ class GrpcTransport(Transport):
 
         logger.debug(
             "GrpcTransport.send_event: repid=%s node=%s simproc=%s addr=%s",
-            repid,
+            envelope.repid,
             envelope.target_node,
             envelope.target_simproc,
             addr,
@@ -157,7 +158,7 @@ class GrpcTransport(Transport):
             # Let the caller / Worker decide how to react (possibly BROKEN).
             raise
 
-    def send_promise(self, repid: str, envelope: PromiseEnvelope) -> None:
+    def send_promise(self, envelope: PromiseEnvelope) -> None:
         """
         Send a PromiseEnvelope via unary gRPC with retry and backoff.
 
@@ -165,10 +166,11 @@ class GrpcTransport(Transport):
         method logs the failure, marks the sending Worker as BROKEN, and
         re-raises the final RpcError.
         """
-        addr = self._resolve_address(repid, envelope.target_node)
+        addr = self._resolve_address(envelope.repid, envelope.target_node)
         endpoint = self._get_or_create_endpoint(addr)
 
         msg = transport_pb2.PromiseEnvelopeMsg(
+            repid=envelope.repid,
             target_node=envelope.target_node,
             target_simproc=envelope.target_simproc,
             seqnr=envelope.seqnr,
@@ -178,7 +180,7 @@ class GrpcTransport(Transport):
 
         logger.debug(
             "GrpcTransport.send_promise: repid=%s node=%s simproc=%s seqnr=%s addr=%s",
-            repid,
+            envelope.repid,
             envelope.target_node,
             envelope.target_simproc,
             envelope.seqnr,

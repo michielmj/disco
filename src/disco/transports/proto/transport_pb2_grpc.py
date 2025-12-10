@@ -2,7 +2,7 @@
 """Client and server classes corresponding to protobuf-defined services."""
 import grpc
 
-import disco.transports.proto.transport_pb2 as transport__pb2
+from disco.transports.proto import transport_pb2 as disco_dot_transports_dot_proto_dot_transport__pb2
 
 
 class DiscoTransportStub(object):
@@ -15,14 +15,14 @@ class DiscoTransportStub(object):
             channel: A grpc.Channel.
         """
         self.SendEvents = channel.stream_unary(
-                '/DiscoTransport/SendEvents',
-                request_serializer=transport__pb2.EventEnvelopeMsg.SerializeToString,
-                response_deserializer=transport__pb2.TransportAck.FromString,
+                '/disco.transports.proto.DiscoTransport/SendEvents',
+                request_serializer=disco_dot_transports_dot_proto_dot_transport__pb2.EventEnvelopeMsg.SerializeToString,
+                response_deserializer=disco_dot_transports_dot_proto_dot_transport__pb2.TransportAck.FromString,
                 )
         self.SendPromise = channel.unary_unary(
-                '/DiscoTransport/SendPromise',
-                request_serializer=transport__pb2.PromiseEnvelopeMsg.SerializeToString,
-                response_deserializer=transport__pb2.TransportAck.FromString,
+                '/disco.transports.proto.DiscoTransport/SendPromise',
+                request_serializer=disco_dot_transports_dot_proto_dot_transport__pb2.PromiseEnvelopeMsg.SerializeToString,
+                response_deserializer=disco_dot_transports_dot_proto_dot_transport__pb2.TransportAck.FromString,
                 )
 
 
@@ -48,17 +48,17 @@ def add_DiscoTransportServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'SendEvents': grpc.stream_unary_rpc_method_handler(
                     servicer.SendEvents,
-                    request_deserializer=transport__pb2.EventEnvelopeMsg.FromString,
-                    response_serializer=transport__pb2.TransportAck.SerializeToString,
+                    request_deserializer=disco_dot_transports_dot_proto_dot_transport__pb2.EventEnvelopeMsg.FromString,
+                    response_serializer=disco_dot_transports_dot_proto_dot_transport__pb2.TransportAck.SerializeToString,
             ),
             'SendPromise': grpc.unary_unary_rpc_method_handler(
                     servicer.SendPromise,
-                    request_deserializer=transport__pb2.PromiseEnvelopeMsg.FromString,
-                    response_serializer=transport__pb2.TransportAck.SerializeToString,
+                    request_deserializer=disco_dot_transports_dot_proto_dot_transport__pb2.PromiseEnvelopeMsg.FromString,
+                    response_serializer=disco_dot_transports_dot_proto_dot_transport__pb2.TransportAck.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'DiscoTransport', rpc_method_handlers)
+            'disco.transports.proto.DiscoTransport', rpc_method_handlers)
     server.add_generic_rpc_handlers((generic_handler,))
 
 
@@ -77,9 +77,9 @@ class DiscoTransport(object):
             wait_for_ready=None,
             timeout=None,
             metadata=None):
-        return grpc.experimental.stream_unary(request_iterator, target, '/DiscoTransport/SendEvents',
-            transport__pb2.EventEnvelopeMsg.SerializeToString,
-            transport__pb2.TransportAck.FromString,
+        return grpc.experimental.stream_unary(request_iterator, target, '/disco.transports.proto.DiscoTransport/SendEvents',
+            disco_dot_transports_dot_proto_dot_transport__pb2.EventEnvelopeMsg.SerializeToString,
+            disco_dot_transports_dot_proto_dot_transport__pb2.TransportAck.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
 
@@ -94,8 +94,8 @@ class DiscoTransport(object):
             wait_for_ready=None,
             timeout=None,
             metadata=None):
-        return grpc.experimental.unary_unary(request, target, '/DiscoTransport/SendPromise',
-            transport__pb2.PromiseEnvelopeMsg.SerializeToString,
-            transport__pb2.TransportAck.FromString,
+        return grpc.experimental.unary_unary(request, target, '/disco.transports.proto.DiscoTransport/SendPromise',
+            disco_dot_transports_dot_proto_dot_transport__pb2.PromiseEnvelopeMsg.SerializeToString,
+            disco_dot_transports_dot_proto_dot_transport__pb2.TransportAck.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)

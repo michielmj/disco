@@ -23,6 +23,7 @@ class WorkerState(IntEnum):
     ACTIVE = 4
     PAUSED = 5
     TERMINATED = 6
+    EXITED = 8
     BROKEN = 9
 
 

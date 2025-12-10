@@ -8,6 +8,7 @@ from typing import Dict, Optional
 
 @dataclass(slots=True)
 class IPCEventMsg:
+    repid: str
     target_node: str
     target_simproc: str
     epoch: float
@@ -19,6 +20,7 @@ class IPCEventMsg:
 
 @dataclass(slots=True)
 class IPCPromiseMsg:
+    repid: str
     target_node: str
     target_simproc: str
     seqnr: int

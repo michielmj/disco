@@ -23,7 +23,7 @@ class InProcessTransport(Transport):
             return False
         return (repid, node) in self.cluster.address_book
 
-    def send_event(self, repid: str, envelope: EventEnvelope) -> None:
+    def send_event(self, envelope: EventEnvelope) -> None:
         try:
             node = self.nodes[envelope.target_node]
         except KeyError as exc:
@@ -31,7 +31,7 @@ class InProcessTransport(Transport):
             raise KeyError(f"InProcessTransport: unknown node {envelope.target_node!r}") from exc
         node.receive_event(envelope)
 
-    def send_promise(self, repid: str, envelope: PromiseEnvelope) -> None:
+    def send_promise(self, envelope: PromiseEnvelope) -> None:
         try:
             node = self.nodes[envelope.target_node]
         except KeyError as exc:

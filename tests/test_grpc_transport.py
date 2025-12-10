@@ -173,6 +173,7 @@ def test_send_event_creates_correct_proto_and_uses_target_address() -> None:
     )
 
     envelope = EventEnvelope(
+        repid="r1",
         target_node="beta",
         target_simproc="worker",
         epoch=1.23,
@@ -180,7 +181,7 @@ def test_send_event_creates_correct_proto_and_uses_target_address() -> None:
         headers={"k": "v"},
     )
 
-    transport.send_event("r1", envelope)
+    transport.send_event(envelope)
 
     # Exactly one stream call
     assert len(recorded_events) == 1
@@ -225,6 +226,7 @@ def test_send_promise_success_without_retry() -> None:
     )
 
     envelope = PromiseEnvelope(
+        repid="r1",
         target_node="beta",
         target_simproc="control",
         seqnr=42,
@@ -232,7 +234,7 @@ def test_send_promise_success_without_retry() -> None:
         num_events=3,
     )
 
-    transport.send_promise("r1", envelope)
+    transport.send_promise(envelope)
 
     # Exactly one successful promise call
     assert len(recorded_promises) == 1
