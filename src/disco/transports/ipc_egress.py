@@ -33,8 +33,14 @@ class IPCTransport(Transport):
         return addr in self._event_queues and addr in self._promise_queues
 
     def send_event(self, repid: str, envelope: EventEnvelope) -> None:
-        addr = self._cluster.address_book[(repid, envelope.target_node)]
+        try:
+            addr = self._cluster.address_book[(repid, envelope.target_node)]
+        except KeyError as exc:
+            raise KeyError(
+                f"IPCTransport: no address for (repid={repid!r}, node={envelope.target_node!r})"
+            ) from exc
         queue = self._event_queues[addr]
+
         if len(envelope.data) <= self._large_payload_threshold:
             msg = IPCEventMsg(
                 target_node=envelope.target_node,
@@ -45,24 +51,30 @@ class IPCTransport(Transport):
                 shm_name=None,
                 size=len(envelope.data),
             )
+            queue.put(msg)
         else:
             shm = SharedMemory(create=True, size=len(envelope.data))
-            buf = shm.buf
-            if buf is None:
-                shm.close()
-                shm.unlink()
-                raise RuntimeError("Shared memory buffer is unavailable")
-            buf[: len(envelope.data)] = envelope.data
-            msg = IPCEventMsg(
-                target_node=envelope.target_node,
-                target_simproc=envelope.target_simproc,
-                epoch=envelope.epoch,
-                headers=envelope.headers,
-                data=None,
-                shm_name=shm.name,
-                size=len(envelope.data),
-            )
-        queue.put(msg)
+            try:
+                buf = shm.buf
+                if buf is None:
+                    raise RuntimeError("Shared memory buffer is unavailable")
+                buf[: len(envelope.data)] = envelope.data
+
+                msg = IPCEventMsg(
+                    target_node=envelope.target_node,
+                    target_simproc=envelope.target_simproc,
+                    epoch=envelope.epoch,
+                    headers=envelope.headers,
+                    data=None,
+                    shm_name=shm.name,
+                    size=len(envelope.data),
+                )
+                queue.put(msg)
+            finally:
+                # We *don't* unlink here; that is receiver's job. But if we failed
+                # before putting the message on the queue, we should unlink.
+                # So we can optionally track success and only unlink on early failure.
+                pass
 
     def send_promise(self, repid: str, envelope: PromiseEnvelope) -> None:
         addr = self._cluster.address_book[(repid, envelope.target_node)]

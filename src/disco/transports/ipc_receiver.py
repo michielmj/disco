@@ -24,12 +24,16 @@ class IPCReceiver:
 
     def run_event_loop(self) -> None:
         while True:
-            msg: IPCEventMsg = self._event_queue.get()
+            msg = self._event_queue.get()
+            if msg is None:  # sentinel
+                break
             self._process_event(msg)
 
     def run_promise_loop(self) -> None:
         while True:
-            msg: IPCPromiseMsg = self._promise_queue.get()
+            msg = self._promise_queue.get()
+            if msg is None:  # sentinel
+                break
             self._process_promise(msg)
 
     def _process_event(self, msg: IPCEventMsg) -> None:
@@ -62,7 +66,7 @@ class IPCReceiver:
     def _extract_event_data(self, msg: IPCEventMsg) -> bytes:
         if msg.shm_name is None:
             if msg.data is None:
-                raise ValueError("IPCEventMsg missing payload")
+                raise ValueError(f"IPCEventMsg missing payload for node={msg.target_node!r}")
             return msg.data
         shm = SharedMemory(name=msg.shm_name)
         try:

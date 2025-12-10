@@ -483,7 +483,7 @@ If Cluster encounters missing, malformed, or nonsensical metadata:
 
 Cluster does not attempt partial interpretation or correction. The orchestration layer must recreate the worker.
 
-### 4.3 Worker State (Ephemeral)
+### 4.3 Worker WorkerState (Ephemeral)
 
 Each worker publishes its runtime state in an ephemeral key:
 
@@ -511,7 +511,7 @@ Because the node is ephemeral:
 
 Cluster does **not** perform any state transitions; it only reflects what the worker publishes.
 
-### 4.4 Desired State (Control Plane Input)
+### 4.4 Desired WorkerState (Control Plane Input)
 
 Each worker receives its desired operational state via a **single structured value** stored under:
 
@@ -708,7 +708,7 @@ class WorkerState(IntEnum):
     BROKEN = 9
 ```
 
-#### State Definitions
+#### WorkerState Definitions
 
 **CREATED** -- Worker registered but not yet set up.\
 **AVAILABLE** -- Ready for a new assignment.\
@@ -741,7 +741,7 @@ The Worker only:
 
 NodeController implementation details are described in a later chapter.
 
-### 5.5 Receiving Desired-State Changes
+### 5.5 Receiving Desired-WorkerState Changes
 
 Workers do not read the Metastore. Instead:
 
@@ -773,7 +773,7 @@ This ensures:
 -   No concurrent modifications of WorkerState or NodeControllers\
 -   No spinning when inactive
 
-### 5.7 Applying Desired-State Commands
+### 5.7 Applying Desired-WorkerState Commands
 
 Desired-state commands may include:
 
@@ -798,7 +798,7 @@ Ingress delivers into NodeController queues. Behavior depends on
 WorkerState:
 
   ------------------------------------------------------------------------
-  State                   Ingress Allowed?               Behavior
+  WorkerState                   Ingress Allowed?               Behavior
   ----------------------- ------------------------------ -----------------
   CREATED                 No                             Not configured
 

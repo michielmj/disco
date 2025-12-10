@@ -25,13 +25,6 @@ class LoggingSettings(BaseModel):
 
 
 class GrpcSettings(BaseModel):
-    bind_host: str = Field(
-        "0.0.0.0", description="Host/interface to bind the gRPC server to."
-    )
-    bind_port: int = Field(
-        50051, description="Port to bind the gRPC server to."
-    )
-
     timeout_s: float = Field(
         600.0, description="Default timeout for gRPC calls in seconds."
     )
@@ -67,6 +60,16 @@ class GrpcSettings(BaseModel):
     compression: Literal["none", "gzip"] = Field(
         "none",
         description="Compression algorithm for gRPC calls.",
+    )
+
+    # Example additional fields (names and exact types may be adjusted in code):
+    promise_retry_delays_s: list[float] = Field(
+        default_factory=lambda: [0.05, 0.15, 0.5, 1.0, 2.0],
+        description="Backoff sequence for promise retries in seconds.",
+    )
+    promise_retry_max_window_s: float = Field(
+        3.0,
+        description="Maximum time window for promise delivery retries in seconds.",
     )
 
 
