@@ -175,7 +175,9 @@ class ZkConnectionManager:
         Internal helper to attach a Kazoo DataWatch for a given cached callback.
         """
 
-        def _wrapped(data: Optional[bytes], stat, event):
+        def _wrapped(
+            data: Optional[bytes], stat: Any, event: Any
+        ) -> bool:
             keep = callback(data, path)
             if not keep:
                 # Remove from cache if callback decides to stop
@@ -213,7 +215,7 @@ class ZkConnectionManager:
         Internal helper to attach a Kazoo ChildrenWatch for a given cached callback.
         """
 
-        def _wrapped(children):
+        def _wrapped(children: Optional[list[str]]) -> bool:
             keep = callback(children, path)
             if not keep:
                 with self._lock:

@@ -1,10 +1,13 @@
-from functools import partial
-from threading import Condition, RLock
-from dataclasses import dataclass, field
-from typing import Mapping, cast
+from __future__ import annotations
 
 from enum import IntEnum
 from types import MappingProxyType
+import uuid
+from functools import partial
+from threading import Condition, RLock
+from dataclasses import asdict, dataclass, field
+from typing import Mapping, cast, Callable, Any
+
 
 from tools.mp_logging import getLogger
 from disco.metastore import Metastore
@@ -12,29 +15,43 @@ from disco.metastore import Metastore
 logger = getLogger(__name__)
 
 
-class State(IntEnum):
-    CREATED = 1
+class WorkerState(IntEnum):
+    CREATED = 0
+    AVAILABLE = 1
     INITIALIZING = 2
-    AVAILABLE = 3
-    ALLOCATED = 4
-    ACTIVE = 5
-    PAUSED = 6
-    DISPOSING = 7
-    BROKEN = 8
+    READY = 3
+    ACTIVE = 4
+    PAUSED = 5
+    TERMINATED = 6
+    EXITED = 8
+    BROKEN = 9
 
 
-@dataclass
-class ServerInfo:
+@dataclass(slots=True)
+class WorkerInfo:
     expid: str | None = None
     repid: str | None = None
     partition: int | None = None
     nodes: list[str] = field(default_factory=list)
 
 
+@dataclass(slots=True)
+class DesiredWorkerState:
+    request_id: str
+    expid: str | None
+    repid: str | None
+    partition: int | None
+    state: WorkerState
+
+    def validate(self):
+        return (self.expid is None) == (self.repid is None) and (self.repid is None) == (self.partition is None)
+
+
 PROCESSES = "/simulation/processes"
 NPARTITIONS = "/simulation/npartitions"
-ACTIVE_SERVERS = "/simulation/active_servers"
-SERVERS = "/simulation/servers"
+REGISTERED_WORKERS = "/simulation/registered_workers"
+WORKERS = "/simulation/workers"
+DESIRED_STATE = "/simulation/desired_state"
 EXPERIMENTS = "/simulation/experiments"
 SCHEDULER_QUEUE = "/simulation/queue"
 ADDRESS_BOOK = "/simulation/address_book"
@@ -52,8 +69,8 @@ LOCKS = "/locks"
 BASE_STRUCTURE = [
     PROCESSES,
     NPARTITIONS,
-    ACTIVE_SERVERS,
-    SERVERS,
+    REGISTERED_WORKERS,
+    WORKERS,
     ADDRESS_BOOK,
     NODES,
     RUNS,
@@ -76,19 +93,21 @@ class Cluster:
         self.meta.ensure_structure(BASE_STRUCTURE)
 
         self._lock = RLock()
-        # Condition uses the same lock as server_state for consistency
+        # Condition uses the same lock as worker_state for consistency
         self._available_condition = Condition(self._lock)
 
         # Internal state
-        self._server_state: dict[str, State] = {}
-        self._server_nodes: dict[str, list[str]] = {}
-        self._server_repids: dict[str, str] = {}
+        self._worker_state: dict[str, WorkerState] = {}
+        self._worker_nodes: dict[str, list[str]] = {}
+        self._worker_repids: dict[str, str] = {}
 
         self._address_book: dict[tuple[str, str], str] = {}
         self._address_book_uptodate = False
 
-        # Watch active servers list
-        self.meta.watch_members_with_callback(ACTIVE_SERVERS, self._watch_children)
+        # Watch registered workers list
+        self.meta.watch_members_with_callback(
+            REGISTERED_WORKERS, self._watch_children
+        )
 
     # ------------------------------------------------------------------ #
     # ZooKeeper watch callbacks
@@ -96,41 +115,41 @@ class Cluster:
 
     def _watch_children(self, children: list[str], _: str) -> bool:
         """
-        Children of ACTIVE_SERVERS changed:
-        - Remove servers that disappeared.
-        - Add new servers and start watching their state/nodes/repid.
+        Children of REGISTERED_WORKERS changed:
+        - Remove workers that disappeared.
+        - Add new workers and start watching their state/nodes/repid.
         """
         with self._lock:
-            current = set(self._server_state.keys())
+            current = set(self._worker_state.keys())
             incoming = set(children)
 
             deletes = current - incoming
             appends = incoming - current
 
             for address in deletes:
-                self._server_state.pop(address, None)
-                self._server_nodes.pop(address, None)
-                self._server_repids.pop(address, None)
+                self._worker_state.pop(address, None)
+                self._worker_nodes.pop(address, None)
+                self._worker_repids.pop(address, None)
                 self._address_book_uptodate = False
 
             for address in appends:
                 # Seed in-memory structures so watch callbacks don't early-return.
-                self._server_state[address] = State.CREATED
-                self._server_nodes[address] = []
-                self._server_repids[address] = ""
+                self._worker_state[address] = WorkerState.CREATED
+                self._worker_nodes[address] = []
+                self._worker_repids[address] = ""
 
                 # Watch individual paths (logical paths, no leading "/")
                 self.meta.watch_with_callback(
-                    f"{ACTIVE_SERVERS}/{address}",
-                    partial(self._watch_server_state, address),
+                    f"{REGISTERED_WORKERS}/{address}",
+                    partial(self._watch_worker_state, address),
                 )
                 self.meta.watch_with_callback(
-                    f"{SERVERS}/{address}/nodes",
-                    partial(self._watch_server_nodes, address),
+                    f"{WORKERS}/{address}/nodes",
+                    partial(self._watch_worker_nodes, address),
                 )
                 self.meta.watch_with_callback(
-                    f"{SERVERS}/{address}/repid",
-                    partial(self._watch_server_repid, address),
+                    f"{WORKERS}/{address}/repid",
+                    partial(self._watch_worker_repid, address),
                 )
 
             # Any change might affect address_book and availability
@@ -139,42 +158,42 @@ class Cluster:
 
         return True
 
-    def _watch_server_state(self, address: str, state: State, _path: str) -> bool:
+    def _watch_worker_state(self, address: str, state: WorkerState, _path: str) -> bool:
         """
-        Called with decoded `state` (State enum) by Metastore.
+        Called with decoded `state` (WorkerState enum) by Metastore.
         """
         with self._lock:
-            if address not in self._server_state:
-                # Server has been removed; stop watching
+            if address not in self._worker_state:
+                # Worker has been removed; stop watching
                 return False
 
-            self._server_state[address] = state
+            self._worker_state[address] = state
             self._available_condition.notify_all()
 
         return True
 
-    def _watch_server_nodes(self, address: str, nodes: list[str] | None, _path: str) -> bool:
+    def _watch_worker_nodes(self, address: str, nodes: list[str] | None, _path: str) -> bool:
         """
         Called with decoded `nodes` (list[str]) by Metastore.
         """
         with self._lock:
-            if address not in self._server_state:
+            if address not in self._worker_state:
                 return False
 
-            self._server_nodes[address] = nodes or []
+            self._worker_nodes[address] = nodes or []
             self._address_book_uptodate = False
 
         return True
 
-    def _watch_server_repid(self, address: str, repid: str | None, _path: str) -> bool:
+    def _watch_worker_repid(self, address: str, repid: str | None, _path: str) -> bool:
         """
         Called with decoded `repid` (str) by Metastore.
         """
         with self._lock:
-            if address not in self._server_state:
+            if address not in self._worker_state:
                 return False
 
-            self._server_repids[address] = repid or ""
+            self._worker_repids[address] = repid or ""
             self._address_book_uptodate = False
 
         return True
@@ -186,13 +205,13 @@ class Cluster:
     @property
     def address_book(self) -> Mapping[tuple[str, str], str]:
         """
-        Mapping (repid, node) -> server address.
+        Mapping (repid, node) -> worker address.
         """
         with self._lock:
             if not self._address_book_uptodate:
                 address_book: dict[tuple[str, str], str] = {}
-                for address, nodes in self._server_nodes.items():
-                    repid = self._server_repids.get(address, "")
+                for address, nodes in self._worker_nodes.items():
+                    repid = self._worker_repids.get(address, "")
                     for node in nodes:
                         address_book[(repid, node)] = address
 
@@ -203,9 +222,9 @@ class Cluster:
             return MappingProxyType(dict(self._address_book))
 
     @property
-    def server_states(self) -> Mapping[str, State]:
+    def worker_states(self) -> Mapping[str, WorkerState]:
         with self._lock:
-            return MappingProxyType(dict(self._server_state))
+            return MappingProxyType(dict(self._worker_state))
 
     # ------------------------------------------------------------------ #
     # Availability / selection
@@ -223,10 +242,10 @@ class Cluster:
     def get_available(self, expid: str = "") -> tuple[list[str], list[int]]:
         """
         Returns:
-          - list of server addresses (preferred first),
-          - list of partitions of preferred servers.
+          - list of worker addresses (preferred first),
+          - list of partitions of preferred workers.
 
-        Preferred servers:
+        Preferred workers:
           - state == AVAILABLE
           - full_status.expid == expid
           - each partition used at most once in the preferred list
@@ -236,9 +255,9 @@ class Cluster:
         partitions: list[int] = []
 
         with self._lock:
-            for address, state in self._server_state.items():
-                if state == State.AVAILABLE:
-                    full_status = self.get_server_info(address)
+            for address, state in self._worker_state.items():
+                if state == WorkerState.AVAILABLE:
+                    full_status = self.get_worker_info(address)
                     if (
                         full_status.expid == expid
                         and full_status.partition is not None
@@ -255,68 +274,66 @@ class Cluster:
     # Metadata helpers
     # ------------------------------------------------------------------ #
 
-    def get_server_info(self, address: str) -> ServerInfo:
-        path = f"{SERVERS}/{address}"
+    def get_worker_info(self, address: str) -> WorkerInfo:
+        path = f"{WORKERS}/{address}"
         if path not in self.meta:
-            raise KeyError(f"Server `{address}` not registered.")
+            raise KeyError(f"Worker `{address}` not registered.")
 
         data = self.meta.get_keys(path)
         if data is None:
-            raise KeyError(f"Server `{address}` has no info.")
-        return ServerInfo(**data)
+            raise KeyError(f"Worker `{address}` has no info.")
+        return WorkerInfo(**data)
 
-    def register_server(self, server: str, state: State = State.CREATED):
+    def register_worker(self, worker: str, state: WorkerState = WorkerState.CREATED) -> None:
         """
-        Registers a server.
+        Registers a worker.
         """
-        active_path = f"{ACTIVE_SERVERS}/{server}"
-        if active_path in self.meta:
-            raise RuntimeError(f"Server {server} already registered.")
+        registered_path = f"{REGISTERED_WORKERS}/{worker}"
+        if registered_path in self.meta:
+            raise RuntimeError(f"Worker {worker} already registered.")
 
-        # Initialize default status under SERVERS/<server>
-        self.meta.update_keys(
-            f"{SERVERS}/{server}", ServerInfo().__dict__
-        )
-        # Ephemeral node marks this server as active
-        self.meta.update_key(active_path, state, ephemeral=True)
+        # Initialize default status under WORKERS/<worker>
+        self.meta.update_keys(f"{WORKERS}/{worker}", asdict(WorkerInfo()))
+        # Ephemeral node marks this worker as registered
+        self.meta.update_key(registered_path, state, ephemeral=True)
 
-    def unregister_server(self, server: str):
-        active_path = f"{ACTIVE_SERVERS}/{server}"
-        if active_path in self.meta:
-            self.meta.drop_key(active_path)
+    def unregister_worker(self, worker: str) -> None:
+        registered_path = f"{REGISTERED_WORKERS}/{worker}"
+        if registered_path in self.meta:
+            self.meta.drop_key(registered_path)
         else:
-            raise RuntimeError(f"Server {server} not registered.")
+            raise RuntimeError(f"Worker {worker} not registered.")
 
-    def set_server_state(self, server: str, state: State):
-        active_path = f"{ACTIVE_SERVERS}/{server}"
-        if active_path not in self.meta:
-            raise RuntimeError(f"Server {server} not registered.")
+    def set_worker_state(self, worker: str, state: WorkerState) -> None:
+        registered_path = f"{REGISTERED_WORKERS}/{worker}"
+        if registered_path not in self.meta:
+            raise RuntimeError(f"Worker {worker} not registered.")
 
-        self.meta.update_key(active_path, state)
+        self.meta.update_key(registered_path, state)
 
-    def get_server_state(self, server: str) -> State:
-        active_path = f"{ACTIVE_SERVERS}/{server}"
-        if active_path not in self.meta:
-            raise RuntimeError(f"Server {server} not registered.")
+    def get_worker_state(self, worker: str) -> WorkerState:
+        registered_path = f"{REGISTERED_WORKERS}/{worker}"
+        if registered_path not in self.meta:
+            raise RuntimeError(f"Worker {worker} not registered.")
 
-        raw = self.meta.get_key(active_path)
+        raw = self.meta.get_key(registered_path)
         if raw is None:
-            raise RuntimeError(f"Server {server} has no state set.")
+            raise RuntimeError(f"Worker {worker} has no state set.")
 
-        return cast(State, raw)
+        return cast(WorkerState, raw)
 
-    def update_server_info(
+    def update_worker_info(
         self,
-        server: str,
+        worker: str,
         partition: int | None = None,
         expid: str | None = None,
         repid: str | None = None,
         nodes: list[str] | None = None,
     ) -> None:
         """
-        Updates server info.
+        Updates worker info.
         """
-        server_path = f"{SERVERS}/{server}"
+        worker_path = f"{WORKERS}/{worker}"
 
         for att, name in (
             (partition, "partition"),
@@ -325,7 +342,70 @@ class Cluster:
             (nodes, "nodes"),
         ):
             if att is not None:
-                self.meta.update_key(f"{server_path}/{name}", att)
+                self.meta.update_key(f"{worker_path}/{name}", att)
+
+    # ------------------------------------------------------------------ #
+    # Handle desired state changes
+    # ------------------------------------------------------------------ #
+
+    def on_desired_state_change(
+            self,
+            worker_address: str,
+            handler: Callable[[DesiredWorkerState], str | None],
+    ) -> uuid.UUID:
+        """
+        Register a callback that receives desired-state changes for `worker_address`.
+
+        The handler is called with a DesiredWorkerState and must return:
+          - None    -> success
+          - str(...) -> error message
+        An ack object is written to the corresponding ack path.
+        """
+        desired_path = f"{DESIRED_STATE}/{worker_address}/desired"
+        ack_path = f"{DESIRED_STATE}/{worker_address}/ack"
+
+        def _callback(value: Any, _) -> bool:
+            # `value` is already decoded by Metastore (likely a dict).
+
+            try:
+                error_msg = handler(cast(DesiredWorkerState, value))
+            except Exception as exc:
+                error_msg = f"Handler error: {exc!r}"
+
+            self.meta.update_key(
+                ack_path,
+                {
+                    "request_id": cast(DesiredWorkerState, value).request_id,
+                    "success": error_msg is None,
+                    "error": error_msg,
+                },
+            )
+
+            return True  # continue watching
+
+        return self.meta.watch_with_callback(desired_path, _callback)
+
+    def set_desired_state(
+            self,
+            worker_address: str,
+            state: WorkerState,
+            expid: str | None = None,
+            repid: str | None = None,
+            partition: int | None = None,
+    ) -> str:
+        desired_path = f"{DESIRED_STATE}/{worker_address}/desired"
+        request_id = str(uuid.uuid4())
+
+        desired = DesiredWorkerState(
+            request_id=request_id,
+            state=state,
+            expid=expid,
+            repid=repid,
+            partition=partition,
+        )
+
+        self.meta.update_key(desired_path, desired)
+        return request_id
 
     # ------------------------------------------------------------------ #
     # Logging hook

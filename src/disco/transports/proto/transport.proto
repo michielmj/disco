@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package disco.transports.proto;
+
+message EventEnvelopeMsg {
+  string repid          = 1;
+  string target_node    = 2;
+  string target_simproc = 3;
+  double epoch          = 4;
+  bytes data            = 5;
+  map<string, string> headers = 6;
+}
+
+message PromiseEnvelopeMsg {
+  string repid          = 1;
+  string target_node    = 2;
+  string target_simproc = 3;
+  int64 seqnr           = 4;
+  double epoch          = 5;
+  int32 num_events      = 6;
+}
+
+message TransportAck {
+  string message = 1;   // optional diagnostics
+}
+
+service DiscoTransport {
+  // Events: potentially large and frequent. Use a client-streaming RPC.
+  rpc SendEvents(stream EventEnvelopeMsg) returns (TransportAck);
+
+  // Promises: always small. Use a unary RPC for better latency and observability.
+  rpc SendPromise(PromiseEnvelopeMsg) returns (TransportAck);
+}
