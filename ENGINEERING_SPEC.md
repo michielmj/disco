@@ -670,7 +670,7 @@ Cluster explicitly does **not**:
 
 It is a pure metadata reflector, translating the contents of the Metastore into in-memory structures for other components to consume.
 
-## Chapter 5: Worker Architecture & Lifecycle (Final Version)
+## 5 Worker Architecture & Lifecycle (Final Version)
 
 ### 5.1 Overview
 
@@ -705,21 +705,24 @@ class WorkerState(IntEnum):
     ACTIVE = 4
     PAUSED = 5
     TERMINATED = 6
+    EXITED = 8
     BROKEN = 9
 ```
 
 #### WorkerState Definitions
 
-**CREATED** -- Worker registered but not yet set up.\
-**AVAILABLE** -- Ready for a new assignment.\
+**CREATED** -- Worker registered but not yet set up.
+**AVAILABLE** -- Ready for a new assignment.
 **INITIALIZING** -- Creating NodeControllers, configuring routing and
-transports.\
-**READY** -- Ready to start the simulation run.\
-**ACTIVE** -- Simulation executing; NodeControllers step each cycle.\
+transports.
+**READY** -- Ready to start the simulation run.
+**ACTIVE** -- Simulation executing; NodeControllers step each cycle.
 **PAUSED** -- Simulation paused; ingress allowed; controllers do not
-step.\
+step.
 **TERMINATED** -- Abort signal; Worker tears down the run and returns to
-AVAILABLE.\
+AVAILABLE.
+**EXITED** -- Shutdown signal; Worker needs to shutdown in order to terminate the
+worker's OS process.
 **BROKEN** -- Irrecoverable internal error; Worker must be restarted.
 
 Workers do **not** have FINISHED/FAILED states; after a successful
@@ -745,11 +748,13 @@ NodeController implementation details are described in a later chapter.
 
 Workers do not read the Metastore. Instead:
 
+```python
     cluster.on_desired_state_change(worker_address, handler)
+```
 
 The handler is invoked on a separate thread. It must:
 
--   Store the received desired-state blob in a thread-safe structure\
+-   Store the received desired-state blob in a thread-safe structure
 -   Notify the Worker runner via a `threading.Condition`
 
 All state transitions occur strictly inside the Worker runner thread.
@@ -758,6 +763,7 @@ All state transitions occur strictly inside the Worker runner thread.
 
 The Worker runner loop is strictly single-threaded:
 
+```python
     while running:
         apply pending desired-state changes
         if ACTIVE:
@@ -766,26 +772,27 @@ The Worker runner loop is strictly single-threaded:
             continue       # do not block
         else:
             wait on Condition until a new desired-state update arrives
+```
 
 This ensures:
 
--   Determinism\
--   No concurrent modifications of WorkerState or NodeControllers\
+-   Determinism
+-   No concurrent modifications of WorkerState or NodeControllers
 -   No spinning when inactive
 
 ### 5.7 Applying Desired-WorkerState Commands
 
 Desired-state commands may include:
 
--   New experiment, replication, partition, and node assignments\
+-   New experiment, replication, partition, and node assignments
 -   A target `WorkerState`
 
 The Worker:
 
--   Validates transitions\
--   Performs intermediate transitions as required\
--   Updates actual state through the Cluster\
--   Creates/tears down NodeControllers as needed\
+-   Validates transitions
+-   Performs intermediate transitions as required
+-   Updates actual state through the Cluster
+-   Creates/tears down NodeControllers as needed
 -   Applies `TERMINATED` by immediately aborting the run and returning
     to AVAILABLE
 
@@ -797,35 +804,17 @@ processed; the latest value wins.
 Ingress delivers into NodeController queues. Behavior depends on
 WorkerState:
 
-  ------------------------------------------------------------------------
-  WorkerState                   Ingress Allowed?               Behavior
-  ----------------------- ------------------------------ -----------------
-  CREATED                 No                             Not configured
-
-  AVAILABLE               No                             No experiment
-                                                         loaded
-
-  INITIALIZING            No                             Routing and
-                                                         queues not ready
-
-  READY                   Yes                            Queues accept
-                                                         events;
-                                                         controllers idle
-
-  ACTIVE                  Yes                            NodeControllers
-                                                         drain
-                                                         continuously
-
-  PAUSED                  Yes                            Queues
-                                                         accumulate; may
-                                                         apply
-                                                         backpressure
-
-  TERMINATED              No                             Worker aborting
-                                                         run
-
-  BROKEN                  No                             Ingress rejected
-  ------------------------------------------------------------------------
+| WorkerState  | Ingress Allowed? | Behavior                                  |
+|--------------|------------------|-------------------------------------------|
+| CREATED      | No               | Not configured                            |       
+| AVAILABLE    | No               | No experiment loaded                      |
+| INITIALIZING | No               | Routing and queues not ready              |
+| READY        | Yes              | Queues accept                             |
+| ACTIVE       | Yes              | NodeControllers drain continuously        |
+| PAUSED       | Yes              | Queues accumulate; may apply backpressure |
+| TERMINATED   | No               | Worker aborting run                       | 
+| EXITED       | No               | Worker shutting down                      | 
+| BROKEN       | No               | Ingress rejected                          |
 
 Backpressure policies are implemented by transports and queue limits.
 
@@ -833,20 +822,20 @@ Backpressure policies are implemented by transports and queue limits.
 
 If a Worker encounters a fatal error:
 
--   Worker enters `BROKEN`\
--   Cluster is notified\
+-   Worker enters `BROKEN`
+-   Cluster is notified
 -   Recovery requires a Worker process restart
 
 ### 5.10 Summary
 
 -   Worker execution and control are fully single-threaded in the
-    runner.\
+    runner.
 -   NodeControllers drain their own queues; the Worker only sequences
-    them.\
+    them.
 -   Desired-state updates arrive asynchronously but are applied
-    synchronously.\
--   `TERMINATED` provides a clean mechanism to abort runs.\
--   WorkerState governs ingress, routing setup, and execution phases.\
+    synchronously.
+-   `TERMINATED` provides a clean mechanism to abort runs.
+-   WorkerState governs ingress, routing setup, and execution phases.
 -   This architecture ensures determinism, thread safety, and
     predictable simulation behavior.
 
@@ -861,7 +850,7 @@ nodes and workers in a simulation cluster. It covers:
 - The **WorkerRouter**, which chooses a transport for each outgoing message.
 - The abstract **Transport** interface.
 - Concrete transports:
-  - **InProcessTransport** (same-process delivery via 'NodeController').
+  - **InProcessTransport** (same-process delivery via `NodeController`).
   - **IPCTransport** (inter-process communication via queues + shared memory).
   - **GrpcTransport** (remote communication between workers over gRPC).
 - The **gRPC ingress** service that receives envelopes from remote workers and
@@ -872,43 +861,43 @@ The goal is to provide a layered, extensible routing architecture where:
 - Local messages are delivered as cheaply as possible.
 - Intra-host messages use efficient IPC channels.
 - Cross-host messages use gRPC with clear retry semantics.
-- The routing policy is determined by a single place (the 'WorkerRouter'),
+- The routing policy is determined by a single place (the `WorkerRouter`),
   not scattered throughout the codebase.
 
 
 ### 6.2 Addressing and Locality Model
 
-Routing decisions are based on the **address book** maintained by 'Cluster'
+Routing decisions are based on the **address book** maintained by `Cluster`
 (chapter 4):
 
-- 'Cluster.address_book: Mapping[tuple[UUID, str], str]'
+- `Cluster.address_book: Mapping[tuple[UUID, str], str]`
 
 Where each entry maps:
 
-- '(repid, node_name) -> address'
+- `(repid, node_name) -> address`
 
 with:
 
-- 'repid: UUID4' — replication id of the experiment.
-- 'node_name: str' — name of the node within the scenario graph.
-- 'address: str' — logical worker address, e.g. '"host:port"' or any other
+- `repid: UUID4` — replication id of the experiment.
+- `node_name: str` — name of the node within the scenario graph.
+- `address: str` — logical worker address, e.g. `"host:port"` or any other
   process-unique identifier.
 
 Each worker:
 
 - Registers itself under a unique **worker address** (chapter 4).
-- Ensures that for all nodes it currently hosts in replication 'repid', the
+- Ensures that for all nodes it currently hosts in replication `repid`, the
   address book entry points to its own address.
 
 Transports interpret an address as follows:
 
 - **InProcessTransport**: the address must match the local worker address and
-  the node must have a local 'NodeController' instance.
+  the node must have a local `NodeController` instance.
 - **IPCTransport**: the address must be present in the local IPC queue maps
-  ('event_queues' and 'promise_queues').
+  (`event_queues` and `promise_queues`).
 - **GrpcTransport**: any address present in the address book is considered
   routable via gRPC; its exact meaning is a gRPC target string such as
-  '"host:port"'.
+  `"host:port"`.
 
 
 ### 6.3 WorkerRouter
@@ -916,24 +905,24 @@ Transports interpret an address as follows:
 The **WorkerRouter** is a worker-local component responsible for selecting a
 transport for each outgoing envelope. It is **long-lived**: a worker creates
 its router once and reuses it for all experiments and replications. The
-router does not store a specific 'repid' in its constructor; instead, the
-current 'repid' is carried by the envelopes themselves.
+router does not store a specific `repid` in its constructor; instead, the
+current `repid` is carried by the envelopes themselves.
 
 #### 6.3.1 Responsibilities
 
-- Own an ordered list of 'Transport' instances.
-- For each outgoing 'EventEnvelope' or 'PromiseEnvelope':
-  - Read 'repid' from the envelope.
+- Own an ordered list of `Transport` instances.
+- For each outgoing `EventEnvelope` or `PromiseEnvelope`:
+  - Read `repid` from the envelope.
   - Ask each transport in order whether it **handles** the target node for
-    that 'repid'.
+    that `repid`.
   - Use the first transport that responds positively.
   - Raise an error if no transport claims responsibility.
 
 The priority order is determined by the worker during construction, typically:
 
-1. 'InProcessTransport'
-2. 'IPCTransport'
-3. 'GrpcTransport'
+1. `InProcessTransport`
+2. `IPCTransport`
+3. `GrpcTransport`
 
 This ensures that the cheapest delivery mechanism is chosen when multiple
 transports could technically reach the same node.
@@ -951,16 +940,16 @@ router = WorkerRouter(
 
 Parameters:
 
-- 'cluster: Cluster' — used only as a source of 'address_book' and locality
+- `cluster: Cluster` — used only as a source of `address_book` and locality
   information. The router does not talk directly to the metastore.
-- 'transports: Sequence[Transport]' — ordered list of transport instances.
+- `transports: Sequence[Transport]` — ordered list of transport instances.
 
-The router is **agnostic to replications**: it never has a 'repid' field of its
-own. All routing decisions are made based on the 'repid' contained in the
+The router is **agnostic to replications**: it never has a `repid` field of its
+own. All routing decisions are made based on the `repid` contained in the
 envelope being sent.
 
 Internally, the router may wrap each transport in a small metadata structure
-that adds a human-readable 'name' for logging and debugging, but this has no
+that adds a human-readable `name` for logging and debugging, but this has no
 effect on routing semantics.
 
 #### 6.3.3 Routing Logic
@@ -983,13 +972,13 @@ def send_promise(self, envelope: PromiseEnvelope) -> None:
     transport.send_promise(envelope)
 ```
 
-The private '_choose_transport(repid: str, target_node: str)' method:
+The private `_choose_transport(repid: str, target_node: str)` method:
 
 - Iterates transports in priority order.
-- Calls 'handles_node(repid, target_node)' on each transport.
-- Returns the first 'Transport' whose 'handles_node' returns 'True'.
-- Logs and skips transports that raise exceptions in 'handles_node'.
-- Raises 'RouterError' if none of the transports can handle the node.
+- Calls `handles_node(repid, target_node)` on each transport.
+- Returns the first `Transport` whose `handles_node` returns `True`.
+- Logs and skips transports that raise exceptions in `handles_node`.
+- Raises `RouterError` if none of the transports can handle the node.
 
 This makes misconfiguration or missing address book entries fail fast and in a
 single, well-defined place.
@@ -998,15 +987,15 @@ single, well-defined place.
 
 The router exposes helpers:
 
-- 'transports() -> Iterable[Transport]' — underlying transports in priority order.
-- 'transport_names() -> list[str]' — names of transports in priority order.
+- `transports() -> Iterable[Transport]` — underlying transports in priority order.
+- `transport_names() -> list[str]` — names of transports in priority order.
 
 These are mainly for diagnostics, tests, and debugging tools.
 
 
 ### 6.4 Transport Interface
 
-All transports implement a common protocol (defined in 'transports.base'):
+All transports implement a common protocol (defined in `transports.base`):
 
 ```python
 class Transport(Protocol):
@@ -1017,29 +1006,29 @@ class Transport(Protocol):
 
 Key points:
 
-- 'handles_node' takes both 'repid' and 'node', since routing may depend on
+- `handles_node` takes both `repid` and `node`, since routing may depend on
   which replication a node belongs to.
-- 'send_event' and 'send_promise' **do not** receive 'repid' as a separate
-  parameter. Instead, all transports read 'envelope.repid' when they need it.
+- `send_event` and `send_promise` **do not** receive `repid` as a separate
+  parameter. Instead, all transports read `envelope.repid` when they need it.
 - Transports are **long-lived**: a worker constructs its transports once
   (e.g. during startup) and reuses them for multiple runs and replications.
 
 Semantics:
 
-- 'handles_node' must be **pure and fast**: it should not perform blocking I/O.
+- `handles_node` must be **pure and fast**: it should not perform blocking I/O.
   It is allowed to consult in-memory data (e.g. the address book or local maps).
-- 'send_event' and 'send_promise' may perform I/O and may raise exceptions on
-  failure. Exceptions propagate up to the caller (typically 'NodeController'),
+- `send_event` and `send_promise` may perform I/O and may raise exceptions on
+  failure. Exceptions propagate up to the caller (typically `NodeController`),
   which can decide whether to log, retry, or treat the failure as fatal.
 
 Transport implementations must avoid **double serialization** of payloads.
-Payloads are serialized exactly once in 'NodeController' before envelopes are
+Payloads are serialized exactly once in `NodeController` before envelopes are
 handed to the router.
 
 
 ### 6.5 InProcessTransport
 
-The **InProcessTransport** delivers messages directly to 'NodeController'
+The **InProcessTransport** delivers messages directly to `NodeController`
 instances in the same process.
 
 #### 6.5.1 Construction
@@ -1051,12 +1040,12 @@ class InProcessTransport(Transport):
     cluster: Cluster
 ```
 
-- 'nodes' maps node names to their local 'NodeController' instances.
-- 'cluster' is used only for address-book checks in 'handles_node'.
+- `nodes` maps node names to their local `NodeController` instances.
+- `cluster` is used only for address-book checks in `handles_node`.
 
-This transport is also long-lived. The worker owns a single 'InProcessTransport'
-instance and updates its 'nodes' mapping as it creates and tears down
-'NodeController's across runs.
+This transport is also long-lived. The worker owns a single `InProcessTransport`
+instance and updates its `nodes` mapping as it creates and tears down
+`NodeController`s across runs.
 
 #### 6.5.2 Routing Decision
 
@@ -1069,9 +1058,9 @@ def handles_node(self, repid: str, node: str) -> bool:
 
 A node is considered in-process if:
 
-- The worker hosts a 'NodeController' for that node, and
-- The address book has an entry for '(repid, node)' mapping to this worker's
-  address (ensured by 'Cluster' and 'Worker' assignment logic).
+- The worker hosts a `NodeController` for that node, and
+- The address book has an entry for `(repid, node)` mapping to this worker's
+  address (ensured by `Cluster` and `Worker` assignment logic).
 
 #### 6.5.3 Delivery
 
@@ -1091,15 +1080,15 @@ def send_promise(self, envelope: PromiseEnvelope) -> None:
     node.receive_promise(envelope)
 ```
 
-'NodeController.receive_event' and 'receive_promise' are responsible for
+`NodeController.receive_event` and `receive_promise` are responsible for
 pushing envelopes into their internal queues and integrating them into the
-deterministic runner loop controlled by the 'Worker'.
+deterministic runner loop controlled by the `Worker`.
 
 
 ### 6.6 IPC Transport (Queues + Shared Memory)
 
 The **IPCTransport** supports communication between processes on the same host
-(or within a tightly coupled environment) via 'multiprocessing.Queue' and
+(or within a tightly coupled environment) via `multiprocessing.Queue` and
 optional shared memory for large payloads.
 
 #### 6.6.1 Egress (IPCTransport)
@@ -1116,10 +1105,10 @@ class IPCTransport(Transport):
         ...
 ```
 
-- 'cluster' provides the address book mapping '(repid, node)' to a worker address.
-- 'event_queues' maps worker addresses to event queues.
-- 'promise_queues' maps worker addresses to promise queues.
-- 'large_payload_threshold' determines when to spill payloads into shared
+- `cluster` provides the address book mapping `(repid, node)` to a worker address.
+- `event_queues` maps worker addresses to event queues.
+- `promise_queues` maps worker addresses to promise queues.
+- `large_payload_threshold` determines when to spill payloads into shared
   memory instead of putting them inline on the queue.
 
 Routing decision:
@@ -1137,29 +1126,29 @@ available for its address.
 
 Event send:
 
-- Read 'repid' from 'envelope.repid'.
-- Resolve 'addr = address_book[(repid, envelope.target_node)]'.
-- If 'len(envelope.data) <= large_payload_threshold':
-  - Construct 'IPCEventMsg' with 'repid', inline 'data', and 'shm_name=None'.
-  - Put the message on 'event_queues[addr]'.
+- Read `repid` from `envelope.repid`.
+- Resolve `addr = address_book[(repid, envelope.target_node)]`.
+- If `len(envelope.data) <= large_payload_threshold`:
+  - Construct `IPCEventMsg` with `repid`, inline `data`, and `shm_name=None`.
+  - Put the message on `event_queues[addr]`.
 - Else:
-  - Allocate a 'SharedMemory' block of size 'len(envelope.data)'.
-  - Copy 'envelope.data' into the buffer.
-  - Construct 'IPCEventMsg' with 'repid', 'data=None', 'shm_name' set to the
-    shared memory name, and 'size' set to the payload length.
+  - Allocate a `SharedMemory` block of size `len(envelope.data)`.
+  - Copy `envelope.data` into the buffer.
+  - Construct `IPCEventMsg` with `repid`, `data=None`, `shm_name` set to the
+    shared memory name, and `size` set to the payload length.
   - Put the message on the event queue.
 
 Promise send:
 
-- Read 'repid' from 'envelope.repid'.
-- Resolve 'addr = address_book[(repid, envelope.target_node)]'.
-- Construct 'IPCPromiseMsg' with 'repid' and the promise metadata.
-- Put the message on 'promise_queues[addr]'.
+- Read `repid` from `envelope.repid`.
+- Resolve `addr = address_book[(repid, envelope.target_node)]`.
+- Construct `IPCPromiseMsg` with `repid` and the promise metadata.
+- Put the message on `promise_queues[addr]`.
 
 
 #### 6.6.2 IPC Message Types
 
-'IPCEventMsg' and 'IPCPromiseMsg' explicitly carry 'repid', so that receivers
+`IPCEventMsg` and `IPCPromiseMsg` explicitly carry `repid`, so that receivers
 and workers do not need out-of-band information to know which replication a
 message belongs to.
 
@@ -1184,15 +1173,15 @@ class IPCPromiseMsg:
     epoch: float
     num_events: int
 ```
-- For small payloads, 'data' is the serialized bytes and 'shm_name' is 'None'.
-- For large payloads, 'data' is 'None', 'shm_name' is the name of the shared
-  memory handle, and 'size' is the actual payload length.
+- For small payloads, `data` is the serialized bytes and `shm_name` is `None`.
+- For large payloads, `data` is `None`, `shm_name` is the name of the shared
+  memory handle, and `size` is the actual payload length.
 
 
 #### 6.6.3 IPCReceiver
 
-'IPCReceiver' provides a small helper for reading from IPC queues and
-forwarding envelopes to local 'NodeController's.
+`IPCReceiver` provides a small helper for reading from IPC queues and
+forwarding envelopes to local `NodeController`s.
 
 ```python
 class IPCReceiver:
@@ -1206,12 +1195,12 @@ class IPCReceiver:
 ```
 Responsibilities:
 
-- 'run_event_loop()' — blocking loop: consume 'IPCEventMsg' from 'event_queue',
-  reconstruct 'EventEnvelope', and call 'NodeController.receive_event'.
-- 'run_promise_loop()' — blocking loop: consume 'IPCPromiseMsg' from
-  'promise_queue', reconstruct 'PromiseEnvelope', and call
-  'NodeController.receive_promise'.
-- '_extract_event_data(msg: IPCEventMsg) -> bytes' — internal helper to restore
+- `run_event_loop()` — blocking loop: consume `IPCEventMsg` from `event_queue`,
+  reconstruct `EventEnvelope`, and call `NodeController.receive_event`.
+- `run_promise_loop()` — blocking loop: consume `IPCPromiseMsg` from
+  `promise_queue`, reconstruct `PromiseEnvelope`, and call
+  `NodeController.receive_promise`.
+- `_extract_event_data(msg: IPCEventMsg) -> bytes` — internal helper to restore
   the payload from inline data or shared memory. It is responsible for closing
   and unlinking the shared memory segment after reading to avoid leaks.
 
@@ -1223,12 +1212,12 @@ that promises can be prioritized over events.
 ### 6.7 gRPC Transport (Egress)
 
 The **GrpcTransport** is responsible for sending envelopes to remote workers
-over gRPC, using the 'DiscoTransport' service defined in
-'transports/proto/transport.proto'.
+over gRPC, using the `DiscoTransport` service defined in
+`transports/proto/transport.proto`.
 
 #### 6.7.1 Protobuf Service
 
-The protobuf messages now also carry 'repid' explicitly, so that gRPC ingress
+The protobuf messages now also carry `repid` explicitly, so that gRPC ingress
 can reconstruct full envelopes and IPC messages without external context.
 
 ```proto
@@ -1277,12 +1266,12 @@ class GrpcTransport(Transport):
         ...
 ```
 
-- 'cluster' provides the address book.
-- 'settings: GrpcSettings' holds timeout, compression, and retry parameters.
-- 'channel_factory' (optional) creates a 'grpc.Channel' given a target address
-  and settings. In production this defaults to a standard 'grpc.insecure_channel'
+- `cluster` provides the address book.
+- `settings: GrpcSettings` holds timeout, compression, and retry parameters.
+- `channel_factory` (optional) creates a `grpc.Channel` given a target address
+  and settings. In production this defaults to a standard `grpc.insecure_channel`
   with configured options (message size limits, keepalive, compression, ...).
-- 'stub_factory' (optional) creates a 'DiscoTransportStub' from a channel.
+- `stub_factory` (optional) creates a `DiscoTransportStub` from a channel.
 
 Address resolution:
 
@@ -1296,14 +1285,14 @@ def _resolve_address(self, repid: str, node: str) -> str:
         ) from exc
 ```
 
-'handles_node' checks whether '(repid, node)' exists in the address book. The
-router ensures that 'GrpcTransport' is only used when higher-priority
+`handles_node` checks whether `(repid, node)` exists in the address book. The
+router ensures that `GrpcTransport` is only used when higher-priority
 transports do not apply.
 
 #### 6.7.3 Event Sending
 
-Events are sent via the 'SendEvents' client-streaming RPC. For simplicity,
-'GrpcTransport.send_event' currently opens a short-lived stream carrying a
+Events are sent via the `SendEvents` client-streaming RPC. For simplicity,
+`GrpcTransport.send_event` currently opens a short-lived stream carrying a
 single message:
 
 ```python
@@ -1334,38 +1323,38 @@ def send_event(self, envelope: EventEnvelope) -> None:
 
     endpoint.stub.SendEvents(_iter(), timeout=self._settings.timeout_s)
 ```
-'_get_or_create_endpoint(addr)' returns a cached structure containing the
+`_get_or_create_endpoint(addr)` returns a cached structure containing the
 channel and stub for the given target address. Channels and stubs are reused
 across calls to minimize connection overhead.
 
-Errors raised by 'SendEvents' propagate back to the caller; there is currently
+Errors raised by `SendEvents` propagate back to the caller; there is currently
 no retry logic for events (they are expected to be retried at a higher layer if
 needed).
 
 
 #### 6.7.4 Promise Sending with Retry
 
-Promises are sent via the unary 'SendPromise' RPC. Because promises are small
-and critical for synchronization, 'GrpcTransport' implements a retry policy
-based on 'GrpcSettings':
+Promises are sent via the unary `SendPromise` RPC. Because promises are small
+and critical for synchronization, `GrpcTransport` implements a retry policy
+based on `GrpcSettings`:
 
-- 'promise_retry_delays_s: list[float]' — backoff sequence between retry
+- `promise_retry_delays_s: list[float]` — backoff sequence between retry
   attempts (in seconds).
-- 'promise_retry_max_window_s: float' — maximum time window for retries
+- `promise_retry_max_window_s: float` — maximum time window for retries
   (in seconds). Once this window is exceeded, the last error is surfaced.
 
 Algorithm:
 
-1. Read 'repid' from 'envelope.repid'.
-2. Resolve 'addr' via '_resolve_address(repid, envelope.target_node)'.
-3. Obtain '_RemoteEndpoint' (channel + stub) for 'addr'.
-4. Build 'PromiseEnvelopeMsg' with all fields, including 'repid'.
-5. Call 'stub.SendPromise(msg, timeout=settings.timeout_s)'.
+1. Read `repid` from `envelope.repid`.
+2. Resolve `addr` via `_resolve_address(repid, envelope.target_node)`.
+3. Obtain `_RemoteEndpoint` (channel + stub) for `addr`.
+4. Build `PromiseEnvelopeMsg` with all fields, including `repid`.
+5. Call `stub.SendPromise(msg, timeout=settings.timeout_s)`.
 6. If the call succeeds, return immediately.
-7. If the call fails with a retryable error (e.g. 'RESOURCE_EXHAUSTED' or
-   'UNAVAILABLE'), wait for the next delay in 'promise_retry_delays_s',
+7. If the call fails with a retryable error (e.g. `RESOURCE_EXHAUSTED` or
+   `UNAVAILABLE`), wait for the next delay in `promise_retry_delays_s`,
    accumulate elapsed time, and retry as long as the total elapsed time is
-   below 'promise_retry_max_window_s'.
+   below `promise_retry_max_window_s`.
 8. Once the retry window is exceeded or a non-retryable error is encountered,
    re-raise the last exception.
 
@@ -1376,10 +1365,10 @@ worker to treat persistent promise delivery failures as higher-level errors
 
 ### 6.8 gRPC Ingress
 
-The **gRPC ingress** is the server-side implementation of 'DiscoTransport'
+The **gRPC ingress** is the server-side implementation of `DiscoTransport`
 that receives envelopes from remote workers and injects them into the local
 IPC queues. The ingress does not store any replication-specific state; it
-relies on the 'repid' field present in each protobuf message.
+relies on the `repid` field present in each protobuf message.
 
 #### 6.8.1 DiscoTransportServicer
 
@@ -1426,10 +1415,10 @@ class DiscoTransportServicer(transport_pb2_grpc.DiscoTransportServicer):
 ```
 Key points:
 
-- The servicer does **not** talk to 'NodeController' directly.
+- The servicer does **not** talk to `NodeController` directly.
 - It performs minimal transformation: protobuf messages → IPC message types.
-- 'repid' is copied verbatim from the protobuf messages into 'IPCEventMsg' and
-  'IPCPromiseMsg'.
+- `repid` is copied verbatim from the protobuf messages into `IPCEventMsg` and
+  `IPCPromiseMsg`.
 - Ingress acceptance is not gated by worker state here; state gating and
   delivery prioritization are handled by the local worker and its runner loop
   when draining the ingress queues.
@@ -1453,20 +1442,20 @@ def start_grpc_server(
 ```
 The worker is responsible for:
 
-- Choosing its own 'worker.address' (which must match the address stored in the
-  'Cluster.address_book' for its nodes).
+- Choosing its own `worker.address` (which must match the address stored in the
+  `Cluster.address_book` for its nodes).
 - Creating the local IPC queues (one event and one promise queue per worker).
-- Passing its own queues to 'start_grpc_server'.
-- Draining those queues in its runner loop, converting 'IPCEventMsg' /
-  'IPCPromiseMsg' into 'EventEnvelope' / 'PromiseEnvelope' (using 'repid' from
-  the message) and delivering them to 'NodeController's.
+- Passing its own queues to `start_grpc_server`.
+- Draining those queues in its runner loop, converting `IPCEventMsg` /
+  `IPCPromiseMsg` into `EventEnvelope` / `PromiseEnvelope` (using `repid` from
+  the message) and delivering them to `NodeController`s.
 
 This design ensures a clean separation:
 
-- 'GrpcTransport' (egress) → remote worker ingress via gRPC.
-- 'DiscoTransportServicer' (ingress) → local IPC queues.
-- 'Worker' runner loop → deterministic, prioritized delivery into
-  'NodeController' instances using the same ingress path for both IPC and gRPC.
+- `GrpcTransport` (egress) → remote worker ingress via gRPC.
+- `DiscoTransportServicer` (ingress) → local IPC queues.
+- `Worker` runner loop → deterministic, prioritized delivery into
+  `NodeController` instances using the same ingress path for both IPC and gRPC.
 
 
 ## 7. Layered Graph and Scenario Subsystem
