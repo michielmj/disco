@@ -1958,3 +1958,230 @@ Future test extensions can include:
 - Round‑tripping a graph (structure + labels) through an in‑memory database with `store_graph` and `load_graph_for_scenario`.
 - Verifying that masks persisted in `graph.vertex_masks` behave correctly in data extraction queries.
 - Performance benchmarks for large graphs and label sets, to validate that no accidental Python loops or object allocations occur in hot paths.
+
+
+## 8. Event Queue
+
+This chapter specifies the **EventQueue** abstraction used by nodes/transports to deterministically process
+incoming events from multiple predecessors in **epoch order**, while supporting **out-of-order arrival**
+of events and **late knowledge** of per-epoch event counts.
+
+The implementation below reflects the reference (pure Python) `EventQueue` logic in `event_queue.py` and the
+expected semantics used by the test-suite.
+
+### 8.1 Purpose and core idea
+
+A node typically receives events from multiple upstream nodes (“predecessors”). To process events safely and
+deterministically, the node must only *enable* an epoch **E** when:
+
+1. Every predecessor has **promised** how many events belong to epoch **E** (or has moved past **E**),
+2. The promised number of events for epoch **E** has been **received** from each predecessor,
+3. No earlier epoch still contains unprocessed events.
+
+The **EventQueue** maintains this discipline and exposes:
+
+- `epoch`: the currently enabled epoch (events may be popped for this epoch).
+- `next_epoch`: the earliest *known* future epoch across all predecessors (or `None` if unknown).
+- `waiting_for`: a human-readable reason why progress is blocked.
+
+### 8.2 Data model
+
+The system has two layers:
+
+#### 8.2.1 EventQueue (node-level aggregator)
+
+`EventQueue` manages:
+
+- A set of named predecessor queues: `dict[str, PredecessorEventQueue]`.
+- Global state:
+  - `_epoch: float` (enabled epoch; `-1.0` means not initiated; `inf` if no predecessors)
+  - `_next_epoch: float | None` (earliest known next epoch)
+  - `_waiting_for: str | None`
+
+#### 8.2.2 PredecessorEventQueue (per-predecessor state)
+
+Each predecessor queue maintains:
+
+- `_promises: list[Promise]` where `Promise = (epoch: float, seqnr: int, num_events: int)`
+  - `seqnr` is strictly increasing for *new* promises.
+- `_num_events: dict[int, int]` mapping `seqnr -> promised_count`
+- `_num_events_received: dict[int, int]` mapping `seqnr -> received_count`
+- `_events: heap[(epoch, counter, data, headers)]` to store events and preserve insertion order for ties.
+- `_seqnr: int` the **last completed** promise seqnr (initially `0`)
+- Derived properties:
+  - `epoch`: epoch of `_seqnr` (i.e., last completed epoch; `-1.0` if none completed yet)
+  - `next_epoch`: epoch of `_seqnr + 1` if known, else `None`
+  - `empty`: whether there are events available **for the current enabled epoch**
+  - `waiting_for_promise` / `waiting_for_events`
+
+**Important:** For a predecessor, the “current enabled epoch” is the epoch of the **last completed promise**
+(i.e., `_seqnr`). Events in the heap for that epoch are ready to be popped.
+
+### 8.3 Promises
+
+A **promise** tells the receiver how many events to expect for `(seqnr, epoch)` from a specific predecessor.
+
+#### 8.3.1 Promise constraints (per predecessor)
+
+For a predecessor `P`, promises must follow:
+
+1. **Monotonic sequence numbers**
+   - A new promise must have `seqnr == len(_promises) + 1`.
+2. **Non-decreasing epochs**
+   - For `i < j`, `epoch[i] <= epoch[j]`.
+   - If a new promise arrives with an earlier epoch than the last promised epoch: **RuntimeError**.
+3. **Promise extension for same epoch**
+   - If the new promise is for the *same* epoch as the last promise and uses a new `seqnr`,
+     the counts are **added** (useful if an epoch is produced in multiple batches).
+4. **Renewed promise (same seqnr)**
+   - A promise with `seqnr == len(_promises)` is a **renewal**.
+   - Renewals are **not used to change epochs**.
+   - Renewals are used to **lower** the promised event count when the original promise used a conservative upper bound.
+   - Renewal rules:
+     - `epoch` must match the last promise epoch, else **RuntimeError**.
+     - Increasing the promised count is ignored (`False` is returned).
+     - Lowering the count below already received events is **RuntimeError**.
+
+This supports a pattern such as promising “a lot” (e.g., a very large value) and later lowering it once the
+true count is known, without violating correctness.
+
+#### 8.3.2 What “completing a promise” means
+
+For a given predecessor and promise seqnr **k**:
+
+- The promise is **complete** when `received_count[k] == promised_count[k]`.
+- When promise **k** completes, the predecessor can advance to epoch `promise[k].epoch`
+  and expose the events for that epoch for popping.
+
+### 8.4 Events
+
+Events arrive as `(sender, epoch, data, headers)`.
+
+#### 8.4.1 Constraints
+
+For a predecessor queue:
+
+- An event must be for the **future** relative to the predecessor’s currently enabled epoch:
+  `event.epoch > predecessor.epoch`.
+  (Events cannot arrive for already-enabled / already-processed epochs.)
+
+Events are stored in a heap keyed by `(epoch, insertion_order)` so:
+
+- Epoch ordering is deterministic.
+- Events within the same epoch preserve arrival order.
+
+#### 8.4.2 Receiving an event increments received counts
+
+When an event for epoch **E** arrives, the predecessor identifies which promise seqnr **k** corresponds
+to epoch **E** and increments `received_count[k]`. This may complete that promise and advance the
+predecessor’s enabled epoch.
+
+### 8.5 Enabling epochs at the node level
+
+`EventQueue` enables an epoch based on the state of all predecessors.
+
+#### 8.5.1 Definition: node epoch completeness
+
+An epoch **E** is considered *complete* for the node if:
+
+- For every predecessor `P`:
+  - `P.epoch > E` (predecessor already progressed beyond **E**), **or**
+  - `P.epoch == E` and `P.empty is False` (events for **E** are available for that predecessor).
+
+If any predecessor is still behind (`P.epoch < E`) or is at **E** but has no events yet (`P.empty is True`),
+the node cannot enable **E**.
+
+This is implemented by `EventQueue.is_complete(epoch)`.
+
+#### 8.5.2 How `try_next_epoch()` chooses `epoch` and `next_epoch`
+
+`try_next_epoch()` performs two decisions:
+
+1. **Choose the smallest enabled epoch that has events**
+   - Predecessors are sorted by `(pred.epoch, pred.empty)` (non-empty first within an epoch).
+   - The node’s `epoch` becomes the earliest epoch that is not blocked by earlier epochs.
+
+2. **Compute `next_epoch`**
+   - `next_epoch` is the minimum of all predecessors’ `pred.next_epoch`, but only if every predecessor
+     has a known next epoch. If any predecessor’s `next_epoch` is `None`, the node’s `next_epoch` becomes `None`
+     and `waiting_for` indicates it is waiting for promises from that predecessor.
+
+This mirrors the intuition from the test diagrams:
+
+- `*` = enabled epoch with events ready
+- `o` = epoch complete but empty (no events for that predecessor in that epoch)
+- `..` = future promises/events not yet enabled
+- `+` = merge across predecessors
+
+Examples:
+
+- `*-- + --o.. = *--`
+  - If the earliest enabled epoch already has events, it becomes the node epoch even if another predecessor’s
+    earliest enabled epoch is empty.
+
+- `o----* + --*.. = *..`
+  - If a predecessor’s earliest enabled epoch is empty, the node may skip to the next non-empty epoch.
+
+### 8.6 Public API and return-value semantics
+
+#### 8.6.1 `register_predecessor(name: str)`
+
+Registers a predecessor. Must be called before the queue is initiated (while `epoch == -1.0`).
+
+#### 8.6.2 `promise(sender, seqnr, epoch, num_events) -> bool`
+
+Routes the promise to the sender’s predecessor queue. If that predecessor’s advancement could unblock the node,
+the node calls `try_next_epoch()`.
+
+Return value:
+- `True` **only if** this call caused the node to advance `epoch` and/or update `next_epoch`.
+- `False` if the node is still blocked (e.g., still waiting for events for the current earliest epoch).
+
+This matters in tests: promising a future epoch typically does *not* return `True` if the current epoch is not
+complete yet.
+
+#### 8.6.3 `push(sender, epoch, data, headers=None) -> bool`
+
+Pushes an event to the sender’s predecessor queue. If that predecessor completes an epoch and the sender’s previous
+enabled epoch is no later than the node epoch, the node calls `try_next_epoch()`.
+
+Return value:
+- `True` **only if** this call caused the node to advance `epoch` and/or update `next_epoch`.
+- `False` if the node did not advance (e.g., still waiting for events from another predecessor).
+
+#### 8.6.4 `pop() -> iterator[(sender, epoch, data, headers)]`
+
+Yields all events for the node’s current `epoch` across all predecessors, then calls `try_next_epoch()` to see if a
+new epoch becomes enabled after popping.
+
+#### 8.6.5 Properties
+
+- `epoch: float`
+  - Enabled epoch; `inf` if there are no predecessors; `-1.0` before initiation.
+- `next_epoch: float | None`
+  - Earliest known future epoch; `None` if unknown due to missing promises; `inf` if no predecessors.
+- `empty: bool`
+  - `True` if there are no further events for the current `epoch` across all predecessors.
+- `waiting_for: str`
+  - Explanation for why progress is blocked (missing initial promises, missing promises for next epoch, or missing events).
+
+### 8.7 Error handling
+
+The reference implementation intentionally treats certain protocol violations as programmer errors:
+
+- Promises that go “back in time” (epoch decreases) raise **RuntimeError**.
+- Renewed promises that reduce `num_events` below already received events raise **RuntimeError**.
+- Events for epochs not strictly in the future of the predecessor’s enabled epoch are rejected (assertion).
+
+These errors are designed to fail fast and surface upstream transport/protocol bugs early.
+
+### 8.8 Testing guidance
+
+Tests should focus on these invariants:
+
+- **Monotonicity:** seqnr increases; epochs do not decrease per predecessor.
+- **Renewal semantics:** renewals only lower counts and may unblock progress if they cause an epoch to become complete.
+- **Return values:** `promise()` / `push()` return `True` only when the *node* state (`epoch`/`next_epoch`) updates.
+- **Multi-predecessor ordering:** node epoch is the smallest epoch that is complete and has events, with `next_epoch`
+  tracking the earliest known next boundary across all predecessors.
+

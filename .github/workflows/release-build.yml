@@ -2,7 +2,7 @@ name: Build & Publish (on Release)
 
 on:
   release:
-    types: [published]  # only when a GitHub Release is published
+    types: [published]
   workflow_dispatch:
 
 jobs:
@@ -24,19 +24,28 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+
+      - name: Install build tooling
+        run: python -m pip install -U pip "cibuildwheel==2.20.*" build
+
+      - name: Cache cibuildwheel
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/cibuildwheel
+          key: cibw-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'setup.cfg', 'setup.py', 'requirements*.txt') }}
+          restore-keys: |
+            cibw-${{ runner.os }}-
 
       - name: Build wheels
         env:
-          CIBW_BUILD: "cp311-* cp312-* cp313-*"
-          CIBW_SKIP: "*-cp314-* *-musllinux_*"
-          CIBW_ARCHS_LINUX: "x86_64"            # 👈 disable aarch64 here
+          CIBW_BUILD: "cp311-* cp312-*"
+          CIBW_SKIP: "*-musllinux_* *-win32 *-win_amd64"
+          CIBW_ARCHS_LINUX: "x86_64"
           CIBW_MANYLINUX_X86_64_IMAGE: "manylinux2014"
-          CIBW_ENVIRONMENT: 'PIP_ONLY_BINARY="numpy,pyarrow,llvmlite,numba" PIP_PREFER_BINARY="1"'
-          CIBW_TEST_ENVIRONMENT: 'PIP_ONLY_BINARY="numpy,pyarrow,llvmlite,numba" PIP_PREFER_BINARY="1"'
-        run: |
-          python -m pip install -U pip cibuildwheel build
-          # cibuildwheel reads settings from pyproject.toml ([tool.cibuildwheel])
-          python -m cibuildwheel --output-dir wheelhouse
+          CIBW_ENVIRONMENT: 'PIP_ONLY_BINARY="numpy,pyarrow,llvmlmlite,numba" PIP_PREFER_BINARY="1" PIP_DISABLE_PIP_VERSION_CHECK="1"'
+          CIBW_TEST_ENVIRONMENT: 'PIP_ONLY_BINARY="numpy,pyarrow,llvmlite,numba" PIP_PREFER_BINARY="1" PIP_DISABLE_PIP_VERSION_CHECK="1"'
+        run: python -m cibuildwheel --output-dir wheelhouse
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -57,10 +66,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
 
       - name: Build sdist
         run: |
-          python -m pip install -U build
+          python -m pip install -U pip build
           python -m build --sdist
 
       - name: Upload sdist
@@ -74,7 +84,7 @@ jobs:
     needs: [build-wheels, build-sdist]
     runs-on: ubuntu-22.04
     permissions:
-      id-token: write   # required for PyPI Trusted Publisher (OIDC)
+      id-token: write
       contents: read
 
     steps:
@@ -95,4 +105,3 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           skip-existing: true
-          # repository-url: https://test.pypi.org/legacy/  # uncomment to publish to TestPyPI

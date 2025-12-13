@@ -11,7 +11,7 @@ classifiers = [
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
-  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: Implementation :: CPython",
   "Programming Language :: C++",
   "Operating System :: OS Independent",
 ]
@@ -23,22 +23,26 @@ dependencies = [
   "kazoo~=2.10",
   "python-graphblas~=2025.2",
   "SQLAlchemy~=2.0",
-  "disco-tools>=0.1.1",
-  "disco-data-logger>=0.1.2"
+  "disco-tools>=0.1.2",
+  "disco-data-logger>=0.1.2",
+  "grpcio>=1.60",
+  "protobuf>=4.25",
 ]
 
 [build-system]
 requires = [
-  "scikit-build-core>=0.9",
+  "scikit-build-core>=0.11.6",
   "pybind11>=2.11",
-  "numpy>=1.23",
+  "numpy>=2.0",
   "setuptools-scm>=8",
 ]
 build-backend = "scikit_build_core.build"
 
 [tool.scikit-build]
 editable.mode = "redirect"
-wheel.packages = ["src/disco"]
+
+[tool.scikit-build.wheel.packages]
+disco = "src/disco"
 
 [tool.scikit-build.metadata]
 version.provider = "scikit_build_core.metadata.setuptools_scm"
@@ -57,6 +61,7 @@ dev = [
   "cibuildwheel>=2.20",
   "pybind11-stubgen>=2.5",
   "twine>=5",
+  "grpcio-tools>=1.60",
 ]
 
 [tool.pytest.ini_options]
@@ -65,24 +70,21 @@ addopts = "-q"
 testpaths = ["tests"]
 
 [tool.cibuildwheel]
-# Only CPython, no PyPy; skip 3.14 until deps catch up.
-build = "cp311-* cp312-* cp313-*"
-skip = "*-win32 *-cp313t-* *-cp314t-* *-cp314-* *-musllinux_*"
+build = "cp311-* cp312-*"
+skip = "*-win32 *-musllinux_*"
 test-command = "pytest -q {project}/tests"
-test-extras = ["dev", "parquet"]
-# Build phase env
-environment = { PIP_ONLY_BINARY = "numpy,pyarrow", PIP_PREFER_BINARY = "1" }
+test-extras = ["dev"]
+environment = { PIP_ONLY_BINARY = "numpy", PIP_PREFER_BINARY = "1", PIP_DISABLE_PIP_VERSION_CHECK = "1" }
 
 [tool.cibuildwheel.linux]
-archs = ["x86_64"]  # add "aarch64" if you enable QEMU
+archs = ["x86_64"]
 
 [tool.cibuildwheel.macos]
-archs = ["arm64", "x86_64"]  # or ["universal2"]
+archs = ["arm64", "x86_64"]
 
 [tool.scikit-build.cmake.define]
 PYBIND11_FINDPYTHON = true
 CMAKE_DOWNLOAD_TIMEOUT = 30
-# BUILD_EXT default (override in CI via env SKBUILD_CMAKE_ARGS)
 BUILD_EXT = true
 
 [tool.mypy]
@@ -92,21 +94,16 @@ warn_unused_ignores = true
 warn_redundant_casts = true
 warn_return_any = true
 ignore_missing_imports = true
-
-# Baseline for the whole project
-disallow_untyped_defs = false
-disallow_incomplete_defs = false
 check_untyped_defs = true
 no_implicit_optional = true
 strict_equality = true
 show_error_codes = true
 
-# You can also add this if you want colored output:
-# color_output = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
 
-# Per-module overrides
 [[tool.mypy.overrides]]
-module = "disco.disco.*"
+module = "disco.*"
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
 no_implicit_reexport = true

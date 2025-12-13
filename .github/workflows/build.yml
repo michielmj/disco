@@ -7,29 +7,40 @@ on:
 
 jobs:
   build-wheels:
+    name: Build wheels (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-22.04, macos-13, macos-14]
-      fail-fast: false
+
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
 
       - name: Install build tooling
-        run: python -m pip install -U pip cibuildwheel build
+        run: python -m pip install -U pip "cibuildwheel==2.20.*" build
+
+      - name: Cache cibuildwheel
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/cibuildwheel
+          key: cibw-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'setup.cfg', 'setup.py', 'requirements*.txt') }}
+          restore-keys: |
+            cibw-${{ runner.os }}-
 
       - name: Build wheels
         env:
-          CIBW_BUILD: "cp311-* cp312-* cp313-*"
-          CIBW_SKIP: "*-cp314-* *-musllinux_*"
-          CIBW_ARCHS_LINUX: "x86_64"            # 👈 disable aarch64 here
+          CIBW_BUILD: "cp311-* cp312-*"
+          CIBW_SKIP: "*-musllinux_* *-win32 *-win_amd64"
+          CIBW_ARCHS_LINUX: "x86_64"               # no aarch64
           CIBW_MANYLINUX_X86_64_IMAGE: "manylinux2014"
-          CIBW_ENVIRONMENT: 'PIP_ONLY_BINARY="numpy,pyarrow,llvmlite,numba" PIP_PREFER_BINARY="1"'
-          CIBW_TEST_ENVIRONMENT: 'PIP_ONLY_BINARY="numpy,pyarrow,llvmlite,numbe" PIP_PREFER_BINARY="1"'
+          CIBW_ENVIRONMENT: 'PIP_ONLY_BINARY="numpy,pyarrow,llvmlite,numba" PIP_PREFER_BINARY="1" PIP_DISABLE_PIP_VERSION_CHECK="1"'
+          CIBW_TEST_ENVIRONMENT: 'PIP_ONLY_BINARY="numpy,pyarrow,llvmlite,numba" PIP_PREFER_BINARY="1" PIP_DISABLE_PIP_VERSION_CHECK="1"'
         run: python -m cibuildwheel --output-dir wheelhouse
 
       - name: Upload wheels
@@ -39,6 +50,7 @@ jobs:
           path: wheelhouse/*.whl
 
   build-sdist:
+    name: Build sdist
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -46,6 +58,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
 
       - name: Install build tooling
         run: python -m pip install -U pip build

@@ -1,32 +1,47 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.18)
 project(disco LANGUAGES CXX)
-
-# Toggle: turn OFF to build pure-Python wheels (no compiled code)
-option(BUILD_EXT "Build the C++/pybind11 extension" ON)
-
-# If you don't build the extension, still allow skbuild to package Python sdist/wheel
-if(NOT BUILD_EXT)
-  message(STATUS "BUILD_EXT=OFF → building pure-Python wheel (no native extension)")
-  return()
-endif()
-
-# --- Native build path (only if BUILD_EXT=ON) ------------------------
-find_package(Python3 COMPONENTS Interpreter Development.Module REQUIRED)
-find_package(pybind11 CONFIG REQUIRED)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/disco)
-set(CPP_DIR ${SRC_DIR}/cpp)
+# Use modern FindPython. scikit-build-core sets Python_ROOT_DIR / Python_EXECUTABLE.
+find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
+find_package(pybind11 CONFIG REQUIRED)
 
-pybind11_add_module(_core
-  ${SRC_DIR}/_core.cpp
+# ---- disco.event_queue._core ----
+
+set(DISCO_EVENT_QUEUE_SRC
+  src/disco/event_queue/_core.cpp
+  src/disco/event_queue/EventQueue.cpp
+  src/disco/event_queue/PredecessorEventQueue.cpp
 )
 
-target_include_directories(_core PRIVATE ${CPP_DIR})
+pybind11_add_module(_core MODULE ${DISCO_EVENT_QUEUE_SRC})
 
-if(APPLE AND NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
-  set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15" CACHE STRING "" FORCE)
-endif()
+target_include_directories(_core PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/disco/event_queue
+)
 
+# On macOS/Linux, pybind11_add_module already links the right Python bits.
+# If you find you need explicit linkage in some environments, prefer this:
+# target_link_libraries(_core PRIVATE Python::Module)
+
+# Install the extension into the Python package directory.
+install(TARGETS _core
+  LIBRARY DESTINATION disco/event_queue
+  RUNTIME DESTINATION disco/event_queue
+  ARCHIVE DESTINATION disco/event_queue
+)
+
+# Install the stub alongside the extension.
+install(FILES
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/disco/event_queue/_core.pyi
+  DESTINATION disco/event_queue
+)
+
+# Mark the package as typed (PEP 561)
+install(FILES
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/disco/event_queue/py.typed
+  DESTINATION disco/event_queue
+)
