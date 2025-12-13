@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from multiprocessing.queues import Queue
 from dataclasses import dataclass
-from queue import Empty, Queue
+from queue import Empty
 from threading import Condition, RLock
-from typing import Dict, Iterable, Optional, Sequence, TYPE_CHECKING, Mapping
+from typing import Dict, Iterable, Optional, TYPE_CHECKING, Mapping
 
 from tools.mp_logging import getLogger
 
@@ -36,10 +37,9 @@ class Assignment:
     This mirrors WorkerInfo in cluster.py, but is kept locally so we can
     handle pending desired-state changes before publishing to Cluster.
     """
-    expid: Optional[str] = None
-    repid: Optional[str] = None
-    partition: Optional[int] = None
-    nodes: Sequence[str] = ()
+    expid: str
+    repid: str
+    partition: int
 
 
 class Worker:
@@ -104,7 +104,7 @@ class Worker:
 
         # Internal state
         self._state: WorkerState = WorkerState.CREATED
-        self._assignment: Assignment = Assignment()
+        self._assignment: Assignment | None = None
         self._nodes: Dict[str, NodeController] = {}
 
         # Router (lifetime = lifetime of Worker)
@@ -194,6 +194,10 @@ class Worker:
     # Ingress API (optional helpers if someone wants to enqueue directly)
     # ------------------------------------------------------------------ #
 
+    @property
+    def state(self):
+        return self._state
+
     def enqueue_ingress_event(self, msg: IPCEventMsg) -> None:
         with self._lock:
             if self._state not in (
@@ -275,7 +279,6 @@ class Worker:
                 desired.expid,
                 desired.repid,
                 desired.partition,
-                desired.nodes,
             )
             return None
 
@@ -475,13 +478,16 @@ class Worker:
             - Tear down current run.
             - Stop the runner loop (run_forever returns EXITED).
         """
+
+        if not desired.validate():
+            raise KeyError('Invalid desired state.')
+
         target = desired.state
 
-        new_assignment = Assignment(
+        new_assignment = None if desired.expid is None else Assignment(
             expid=desired.expid,
             repid=desired.repid,
             partition=desired.partition,
-            nodes=tuple(desired.nodes or ()),
         )
 
         logger.info(
@@ -506,7 +512,7 @@ class Worker:
 
         if target == WorkerState.AVAILABLE:
             self._teardown_run_locked()
-            self._assignment = Assignment()
+            self._assignment = None
             self._update_worker_info_locked()
             self._set_state_locked(WorkerState.AVAILABLE)
             return
@@ -535,9 +541,10 @@ class Worker:
                 raise WorkerError(
                     f"Cannot transition to ACTIVE from {self._state.name}"
                 )
-            self._assignment = (
-                new_assignment if new_assignment.nodes else self._assignment
-            )
+
+            if new_assignment is not None:
+                self._assignment = new_assignment
+
             self._update_worker_info_locked()
             self._set_state_locked(WorkerState.ACTIVE)
             return
@@ -562,7 +569,7 @@ class Worker:
 
             self._set_state_locked(WorkerState.TERMINATED)
             self._teardown_run_locked()
-            self._assignment = Assignment()
+            self._assignment = None
             self._update_worker_info_locked()
             self._set_state_locked(WorkerState.AVAILABLE)
             return
@@ -584,14 +591,12 @@ class Worker:
 
         self._teardown_run_locked()
 
-        nodes = list(self._assignment.nodes)
         logger.info(
-            "Worker %s setting up run for expid=%s repid=%s partition=%s nodes=%s",
+            "Worker %s setting up run for expid=%s repid=%s partition=%s",
             self._name,
             self._assignment.expid,
             self._assignment.repid,
             self._assignment.partition,
-            nodes,
         )
 
         self._nodes = {}
@@ -677,4 +682,3 @@ class Worker:
 
         self._running = False
         self._condition.notify_all()
-        

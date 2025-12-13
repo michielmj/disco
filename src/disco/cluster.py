@@ -41,8 +41,10 @@ class DesiredWorkerState:
     expid: str | None
     repid: str | None
     partition: int | None
-    nodes: list[str] | None
     state: WorkerState
+
+    def validate(self):
+        return (self.expid is None) == (self.repid is None) and (self.repid is None) == (self.partition is None)
 
 
 PROCESSES = "/simulation/processes"
@@ -390,7 +392,6 @@ class Cluster:
             expid: str | None = None,
             repid: str | None = None,
             partition: int | None = None,
-            nodes: list[str] | None = None,
     ) -> str:
         desired_path = f"{DESIRED_STATE}/{worker_address}/desired"
         request_id = str(uuid.uuid4())
@@ -401,7 +402,6 @@ class Cluster:
             expid=expid,
             repid=repid,
             partition=partition,
-            nodes=nodes,
         )
 
         self.meta.update_key(desired_path, desired)

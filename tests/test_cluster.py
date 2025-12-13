@@ -284,7 +284,6 @@ def test_set_desired_state_writes_desired_worker_state(meta: FakeMetastore, clus
         expid="exp-1",
         repid="rep-1",
         partition=2,
-        nodes=["n1", "n2"],
     )
 
     desired_path = f"{DESIRED_STATE}/{worker}/desired"
@@ -295,7 +294,6 @@ def test_set_desired_state_writes_desired_worker_state(meta: FakeMetastore, clus
     assert value.expid == "exp-1"
     assert value.repid == "rep-1"
     assert value.partition == 2
-    assert value.nodes == ["n1", "n2"]
     assert isinstance(value.request_id, str)
     assert value.request_id  # non-empty
 
